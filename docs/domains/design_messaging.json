@@ -1,0 +1,635 @@
+{
+  "domain": "messaging (dominio canonico foundation: `dialogue`; slug WS/REST: `dialogue`)",
+  "summary": "Il dominio gestisce le comunicazioni private 1:1 dell'evento: Missive Segrete (DM pseudonimi verso chiunque, tramite una \"maschera\" che nasconde anche lo pseudonimo di gioco), la conversione della missiva in chat privata dopo rivelazione o \"Invito al Dialogo\" proveniente da photo/discovery, e lo scambio di contatti reali (Instagram/telefono) solo dopo doppio opt-in con entrambe le identita rivelate. Tutto e scopato per `event_id`, i contatti reali vivono solo qui (cifrati, retention breve) e nessun payload broadcast deanonimizza mittenti mascherati o Cacciatori.",
+  "tables": [
+    {
+      "name": "conversation",
+      "purpose": "Thread privato 1:1 tra due participant dello stesso evento. Radice della macchina a stati di rivelazione e scambio contatti. Puo nascere da una missiva mascherata, da un Invito al Dialogo (photo/discovery) o da chat diretta.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "initiator_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. Chi ha aperto (mittente missiva / Soggetto che invita)"
+        },
+        {
+          "name": "recipient_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. CHECK (initiator_id <> recipient_id)"
+        },
+        {
+          "name": "initiator_mask_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->dialogue_mask.id ON DELETE SET NULL. Maschera usata dall'iniziatore; NULL se in chiaro"
+        },
+        {
+          "name": "recipient_mask_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->dialogue_mask.id ON DELETE SET NULL"
+        },
+        {
+          "name": "origin",
+          "type": "enum conversation_origin(missive|dialogue_invite|direct)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "source_ref",
+          "type": "jsonb",
+          "constraints": "NULL. Per dialogue_invite: {photo_id, comment_id?}. Riferimenti minimizzati, mai identita reali"
+        },
+        {
+          "name": "status",
+          "type": "enum conversation_status(active|blocked|closed)",
+          "constraints": "NOT NULL DEFAULT 'active'"
+        },
+        {
+          "name": "initiator_revealed",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false. Monotono (solo false->true)"
+        },
+        {
+          "name": "recipient_revealed",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false. Monotono"
+        },
+        {
+          "name": "initiator_contact_consent",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false"
+        },
+        {
+          "name": "recipient_contact_consent",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false"
+        },
+        {
+          "name": "contact_exchanged_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Set quando entrambi consenso + entrambi rivelati"
+        },
+        {
+          "name": "first_reply_awarded",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false. Guardia idempotenza punti missive_replied a livello riga (oltre al ledger)"
+        },
+        {
+          "name": "last_message_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Per ordinamento lista conversazioni"
+        },
+        {
+          "name": "initiator_last_read_at",
+          "type": "timestamptz",
+          "constraints": "NULL"
+        },
+        {
+          "name": "recipient_last_read_at",
+          "type": "timestamptz",
+          "constraints": "NULL"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (TimestampMixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "ix_conversation_event_id (event_id)",
+        "ix_conversation_initiator (event_id, initiator_id, last_message_at DESC)",
+        "ix_conversation_recipient (event_id, recipient_id, last_message_at DESC)",
+        "uq_conversation_pair_origin UNIQUE (event_id, initiator_id, recipient_id, origin) parziale WHERE origin='dialogue_invite' (evita doppio invito sulla stessa coppia; le missive restano multiple per l'intrigo)"
+      ]
+    },
+    {
+      "name": "dialogue_message",
+      "purpose": "Singolo messaggio dentro una conversation. Include messaggi 'system' generati dalla macchina a stati (rivelazione, scambio contatti).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7, ordinabile temporalmente)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "conversation_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->conversation.id ON DELETE CASCADE"
+        },
+        {
+          "name": "sender_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. Mai esposto se il mittente e mascherato"
+        },
+        {
+          "name": "sender_masked",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT true. Snapshot: come veniva mostrato il mittente al momento dell'invio"
+        },
+        {
+          "name": "sender_mask_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->dialogue_mask.id ON DELETE SET NULL"
+        },
+        {
+          "name": "kind",
+          "type": "enum message_kind(text|system)",
+          "constraints": "NOT NULL DEFAULT 'text'"
+        },
+        {
+          "name": "system_event",
+          "type": "text",
+          "constraints": "NULL. Per kind='system': 'initiator_revealed'|'recipient_revealed'|'contact_exchanged'|'blocked'"
+        },
+        {
+          "name": "body",
+          "type": "text",
+          "constraints": "NOT NULL. CHECK (kind='system' OR char_length(body) BETWEEN 1 AND 1000)"
+        },
+        {
+          "name": "read_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Read receipt destinatario"
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Soft-delete/tombstone (moderazione/erase)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "ix_dialogue_message_conversation (conversation_id, created_at DESC, id DESC) per keyset pagination",
+        "ix_dialogue_message_event_id (event_id)"
+      ]
+    },
+    {
+      "name": "dialogue_mask",
+      "purpose": "Pseudonimo segreto ('nom de plume', es. 'Maschera Cremisi') con cui un participant invia missive senza rivelare nemmeno il proprio pseudonimo di gioco. Il legame mask->participant e server-side, visibile solo al proprietario e all'host per moderazione.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. Proprietario reale, MAI in payload verso il counterpart"
+        },
+        {
+          "name": "alias",
+          "type": "text",
+          "constraints": "NOT NULL. Nome mostrato. CHECK char_length BETWEEN 2 AND 40"
+        },
+        {
+          "name": "generated",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT true. Auto-generata vs custom"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "uq_dialogue_mask_event_alias UNIQUE (event_id, lower(alias))",
+        "ix_dialogue_mask_participant (event_id, participant_id)"
+      ]
+    },
+    {
+      "name": "dialogue_contact",
+      "purpose": "Contatto reale (Instagram/telefono) svelato a un counterpart. UNICA sede nel sistema dei contatti reali (foundation 6.1). Valore cifrato app-level, retention breve, cancellabile su revoca.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "conversation_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->conversation.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. Proprietario del contatto"
+        },
+        {
+          "name": "revealed_to_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. Counterpart autorizzato a leggerlo"
+        },
+        {
+          "name": "contact_type",
+          "type": "enum dialogue_contact_type(instagram|phone|other)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "contact_value_enc",
+          "type": "bytea",
+          "constraints": "NOT NULL. Cifrato (AEAD, chiave da settings/KMS). Mai in log"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL. min(event.retention_until, now()+7d). Job purge dedicato"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "uq_dialogue_contact_owner UNIQUE (conversation_id, participant_id, contact_type)",
+        "ix_dialogue_contact_expires (expires_at)",
+        "ix_dialogue_contact_event_id (event_id)"
+      ]
+    },
+    {
+      "name": "dialogue_block",
+      "purpose": "Blocco a livello participant per prevenire missive/chat indesiderate (safety, anti-harassment). Indipendente dallo stato della singola conversation.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "blocker_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "blocked_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE. CHECK (blocker_id <> blocked_id)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "uq_dialogue_block UNIQUE (event_id, blocker_id, blocked_id)",
+        "ix_dialogue_block_blocked (event_id, blocked_id)"
+      ]
+    },
+    {
+      "name": "dialogue_preference",
+      "purpose": "Preferenza di ricezione missive per-participant (opt-out granulare oltre al blocco puntuale).",
+      "columns": [
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "PK, FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "accept_missives_from",
+          "type": "enum missive_policy(anyone|revealed_only|nobody)",
+          "constraints": "NOT NULL DEFAULT 'anyone'. 'revealed_only' obbliga il mittente a inviare in chiaro"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "ix_dialogue_preference_event (event_id)"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/v1/missives",
+      "purpose": "Invia una Missiva Segreta: crea (o riusa) una conversation mascherata verso un participant e inserisce il primo messaggio.",
+      "auth": "participant",
+      "request": "{recipient_id: uuid, body: str(1..1000), mask?: {mask_id?: uuid, alias?: str}, masked?: bool=true}. Se mask assente e masked=true -> genera dialogue_mask. Se masked=false invia in chiaro (pseudonimo).",
+      "response": "201 {conversation: {id, origin:'missive', counterpart_display, status}, message: {id, ts}}. Errori: 403 dialogue.recipient_blocks_you / dialogue.missives_disabled / dialogue.reveal_required, 404 fuori scope evento, 410 event.closed, 429 dialogue.rate_limited"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/conversations",
+      "purpose": "Elenca le mie conversazioni con display del counterpart (maschera o pseudonimo secondo lo stato), ultimo messaggio, unread count.",
+      "auth": "participant",
+      "request": "query: ?limit=1..100&cursor=<opaque> (keyset su last_message_at DESC,id DESC)",
+      "response": "200 {items:[{id, origin, counterpart_display:{kind:'mask'|'participant', alias?|pseudonym?, noble_title?}, unread_count, last_message_preview, status, reveal_state, contact_state}], page:{next_cursor,limit}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/conversations/{id}",
+      "purpose": "Dettaglio conversazione con stato macchina (rivelazioni, consensi contatto) dalla prospettiva del richiedente.",
+      "auth": "participant (deve essere parte)",
+      "request": "path id",
+      "response": "200 {id, origin, source_ref?, my_role, counterpart_display, initiator_revealed, recipient_revealed, my_contact_consent, counterpart_contact_consent, contact_exchanged: bool, status}. 404 se non parte/fuori scope"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/conversations/{id}/messages",
+      "purpose": "Messaggi della conversazione, keyset paginati.",
+      "auth": "participant (parte)",
+      "request": "path id; query ?limit&cursor",
+      "response": "200 {items:[{id, sender_display, kind, system_event?, body, mine: bool, read_at, ts}], page:{next_cursor,limit}}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/messages",
+      "purpose": "Rispondi/invia messaggio in una conversazione esistente. Puo far scattare i punti missive_replied.",
+      "auth": "participant (parte, non bloccato)",
+      "request": "{body: str(1..1000)}",
+      "response": "201 {id, ts}. 403 dialogue.conversation_blocked, 410 event.closed"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/read",
+      "purpose": "Segna letti i messaggi fino a ora (aggiorna *_last_read_at, read receipt).",
+      "auth": "participant (parte)",
+      "request": "body vuoto (o {up_to_message_id?})",
+      "response": "204. Emette dialogue.message_read al counterpart"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/reveal",
+      "purpose": "Rivela la propria identita di gioco (pseudonimo+titolo) nella conversazione. Azione monotona, irreversibile.",
+      "auth": "participant (parte)",
+      "request": "body vuoto",
+      "response": "200 {initiator_revealed, recipient_revealed}. Inserisce messaggio system + WS dialogue.revealed. 409 dialogue.already_revealed"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/contact-consent",
+      "purpose": "Acconsente a condividere il proprio contatto reale. Richiede di essere gia rivelato. Se anche il counterpart ha consenso -> scambio automatico.",
+      "auth": "participant (parte, rivelato)",
+      "request": "{contact_type: instagram|phone|other, contact_value: str}",
+      "response": "200 {contact_consent:true, contact_exchanged: bool}. Se scambio: crea 2 dialogue_contact, system message, WS dialogue.contact_exchanged, punti dialogue_matched. 403 dialogue.reveal_required_for_contact"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/conversations/{id}/contact-consent",
+      "purpose": "Revoca il consenso e cancella il proprio contatto condiviso (diritto di revoca GDPR).",
+      "auth": "participant (parte)",
+      "request": "path id",
+      "response": "204. Hard-delete della propria dialogue_contact; azzera il flag; se era scambiato invalida l'accesso del counterpart al proprio contatto"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/conversations/{id}/contacts",
+      "purpose": "Recupera i contatti reali scambiati (decifrati) visibili solo alle due parti dopo lo scambio.",
+      "auth": "participant (parte, contact_exchanged)",
+      "request": "path id",
+      "response": "200 {contacts:[{participant_display, contact_type, contact_value}]}. 403/404 se non scambiato o non parte"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/invite",
+      "purpose": "Invito al Dialogo: il Soggetto (o buon commentatore) apre una chat verso un target da photo/discovery. L'iniziatore risulta rivelato; il target resta mascherato finche non rivela. Chiamato anche internamente via use case da discovery/photo.",
+      "auth": "participant",
+      "request": "{target_id: uuid, source_ref: {photo_id: uuid, comment_id?: uuid}}",
+      "response": "201 {conversation:{id, origin:'dialogue_invite', ...}}. Idempotente sulla coppia+origin (409/riuso). Emette WS dialogue.chat_opened al target"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/block",
+      "purpose": "Blocca il counterpart (crea dialogue_block + status='blocked').",
+      "auth": "participant (parte)",
+      "request": "body vuoto",
+      "response": "204"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/unblock",
+      "purpose": "Rimuove il blocco relativo (se il blocco lo aveva posto il richiedente).",
+      "auth": "participant (parte)",
+      "request": "body vuoto",
+      "response": "204"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/blocks",
+      "purpose": "Blocca direttamente un participant (anche senza conversazione, preventivo).",
+      "auth": "participant",
+      "request": "{participant_id: uuid}",
+      "response": "201. 409 dialogue.already_blocked"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/blocks/{participant_id}",
+      "purpose": "Sblocca un participant.",
+      "auth": "participant",
+      "request": "path participant_id",
+      "response": "204"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/masks",
+      "purpose": "Elenca le mie maschere per riuso in nuove missive.",
+      "auth": "participant",
+      "request": "nessuno",
+      "response": "200 {items:[{id, alias, generated, created_at}]}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/masks",
+      "purpose": "Crea una maschera custom (alias unico per-evento).",
+      "auth": "participant",
+      "request": "{alias: str(2..40)}",
+      "response": "201 {id, alias}. 409 dialogue.mask_alias_taken"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/me/dialogue-preference",
+      "purpose": "Imposta la policy di ricezione missive (anyone|revealed_only|nobody).",
+      "auth": "participant",
+      "request": "{accept_missives_from: anyone|revealed_only|nobody}",
+      "response": "200 {accept_missives_from}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/conversations/{id}/report",
+      "purpose": "Segnala la conversazione/un messaggio alla moderazione (delega al dominio moderation; nasconde rapidamente lato feed personale).",
+      "auth": "participant (parte)",
+      "request": "{message_id?: uuid, reason: str}",
+      "response": "202 {report_id}. Il contenuto e gestito da moderation.report"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "dialogue.missive_received",
+      "direction": "server->client",
+      "payload": "{conversation_id, message_id, sender_display:{kind:'mask',alias} | {kind:'participant',pseudonym,noble_title}, preview?: str, origin:'missive', ts}. Consegnato SOLO al destinatario via send_to_participant. Se mittente mascherato NON contiene mai sender participant_id",
+      "when": "Alla creazione di una missiva verso il destinatario (POST /missives)"
+    },
+    {
+      "name": "dialogue.chat_opened",
+      "direction": "server->client",
+      "payload": "{conversation_id, origin:'dialogue_invite', source_ref:{photo_id, comment_id?}, initiator_display}. send_to_participant al target",
+      "when": "Invito al Dialogo (POST /conversations/invite)"
+    },
+    {
+      "name": "dialogue.message_received",
+      "direction": "server->client",
+      "payload": "{conversation_id, message_id, sender_display (mask o pseudonimo secondo reveal), kind, body, ts}. send_to_participant al counterpart. Nessun participant_id del mittente se mascherato",
+      "when": "Nuovo messaggio in conversazione esistente (POST /messages)"
+    },
+    {
+      "name": "dialogue.message_read",
+      "direction": "server->client",
+      "payload": "{conversation_id, reader_display, read_at}. send_to_participant al mittente dei messaggi letti",
+      "when": "POST /conversations/{id}/read"
+    },
+    {
+      "name": "dialogue.revealed",
+      "direction": "server->client",
+      "payload": "{conversation_id, participant_id, pseudonym, noble_title}. Ora l'identita di gioco puo essere esposta (non e identita reale). send_to_participant al counterpart",
+      "when": "POST /conversations/{id}/reveal"
+    },
+    {
+      "name": "dialogue.contact_consent_updated",
+      "direction": "server->client",
+      "payload": "{conversation_id, participant_display, consented:true, pending: bool}. Segnala che il counterpart ha dato consenso ma manca il reciproco. NON contiene il contatto",
+      "when": "POST /contact-consent quando lo scambio non e ancora completo"
+    },
+    {
+      "name": "dialogue.contact_exchanged",
+      "direction": "server->client",
+      "payload": "{conversation_id, contacts:[{participant_display, contact_type, contact_value}]}. Contiene contatti reali: consegnato SOLO alle due parti via send_to_participant, MAI broadcast",
+      "when": "Entrambi i consensi presenti + entrambi rivelati (scambio completato)"
+    },
+    {
+      "name": "dialogue.blocked",
+      "direction": "server->client",
+      "payload": "{conversation_id}. Solo verso i device del blocker (sync multi-tab). Il bloccato non viene notificato",
+      "when": "POST /block o /blocks"
+    },
+    {
+      "name": "dialogue.typing",
+      "direction": "client->server",
+      "payload": "{conversation_id}. Effimero, non persistito, rate-limited",
+      "when": "L'utente sta scrivendo"
+    },
+    {
+      "name": "dialogue.typing",
+      "direction": "server->client",
+      "payload": "{conversation_id, sender_display}. Rilanciato al solo counterpart via send_to_participant",
+      "when": "Relay dell'indicatore di digitazione"
+    }
+  ],
+  "rules": [
+    "MASCHERAMENTO: il display del mittente e derivato, mai persistito lato client. displayOf(part, conv, viewer) = se part rivelato in conv -> {pseudonym, noble_title} else -> {alias della mask di part in conv}. INVARIANTE di discrezione: nessun payload verso il counterpart puo contenere il participant_id di una parte non rivelata (usare solo alias+conversation_id).",
+    "STATO RIVELAZIONE (per lato, monotono): revealed(x): false -> true, irreversibile. reveal(conv, side) => set side_revealed=true, insert message(kind=system, system_event='{side}_revealed'), WS dialogue.revealed. Nessuna transizione true->false.",
+    "STATO CONTATTO (doppio opt-in): consent(conv, side) richiede side_revealed=true (guardia: altrimenti errore dialogue.reveal_required_for_contact). exchange scatta SSE (initiator_contact_consent AND recipient_contact_consent AND initiator_revealed AND recipient_revealed) => set contact_exchanged_at=now(); crea 2 dialogue_contact (owner->revealed_to reciproci) con expires_at=min(event.retention_until, now()+7d); insert message system 'contact_exchanged'; WS dialogue.contact_exchanged alle 2 parti; award dialogue_matched.",
+    "STATO CONVERSATION: active -> blocked (block da una parte) ; blocked -> active (unblock del medesimo blocker se non esistono altri block attivi) ; {active,blocked} -> closed (event.close: revoca invio, sola lettura). In 'blocked' e 'closed' POST /messages -> 403/410.",
+    "ELEGGIBILITA MISSIVA (guardie AND): recipient nello stesso event AND recipient_id != sender_id AND NOT block(recipient->sender) AND NOT block(sender->recipient) AND policy(recipient) consente: policy='nobody' -> 403; policy='revealed_only' e masked=true -> 403 dialogue.reveal_required; policy='anyone' -> ok. AND event.status='open'.",
+    "RATE LIMIT MISSIVE (anti-harassment): max 5 NUOVI thread-missiva verso destinatari distinti per finestra scorrevole di 10 minuti per mittente; oltre -> 429 dialogue.rate_limited. Messaggi entro thread esistenti non contano.",
+    "PUNTI missive_replied (FORMULA): scatta quando origin='missive' AND il messaggio e il PRIMO del recipient (count messaggi kind='text' del recipient nella conv == 1) AND first_reply_awarded=false AND sender_id(reply) != initiator. Effetto: award_points(delta=+10, reason='missive_replied', beneficiario=initiator, idempotency_key='missive_replied:{conversation_id}', source_domain='dialogue'); set first_reply_awarded=true nella stessa transazione. Una sola volta per conversazione.",
+    "PUNTI dialogue_matched (FORMULA): allo scambio contatti, per ciascuna delle 2 parti p: award_points(delta=+15, reason='dialogue_matched', beneficiario=p, idempotency_key='dialogue_matched:{conversation_id}:{p}', source_domain='dialogue'). Idempotente su redelivery.",
+    "ORDINE PERSISTENZA->REALTIME (foundation 4.4): ogni use case committa il DB e ritorna una lista di DomainEvent puri; il router in infrastructure li traduce in buste e chiama EventBus. I punti passano SEMPRE via PointsPort di gamification, mai scrittura diretta di point_ledger/participant.score.",
+    "CIFRATURA CONTATTI: contact_value cifrato AEAD con chiave da settings/KMS prima dell'insert; decifrato solo in GET /contacts per una parte autorizzata dopo contact_exchanged. Mai in log, mai in WS broadcast, mai in altri domini.",
+    "READ MODEL LISTA: unread_count(conv, viewer) = count(dialogue_message WHERE conversation_id=conv AND sender_id != viewer AND deleted_at IS NULL AND created_at > viewer_last_read_at). Ordinamento conversazioni per last_message_at DESC (keyset)."
+  ],
+  "points": [
+    {
+      "action": "Missiva che genera risposta (prima risposta del destinatario a una missiva mascherata/in chiaro)",
+      "points": "+10 all'iniziatore, una sola volta per conversazione",
+      "notes": "reason=missive_replied (gia presente in PointReason foundation). idempotency_key='missive_replied:{conversation_id}'. Guardia extra first_reply_awarded. Anti-farming: parti distinte, solo origin='missive'"
+    },
+    {
+      "action": "Match riuscito: scambio contatti completato (doppio consenso + entrambi rivelati)",
+      "points": "+15 a ciascuna delle due parti",
+      "notes": "reason=dialogue_matched (NUOVO valore additivo da aggiungere a shared/core/enums.py PointReason via PR). idempotency_key='dialogue_matched:{conversation_id}:{participant_id}'"
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: i contatti reali (Instagram/telefono) esistono SOLO in dialogue_contact, cifrati AEAD, creati solo dopo doppio opt-in con entrambe le identita di gioco rivelate. Nessun altro dominio li memorizza o li mette in payload REST/WS (foundation 6.1).",
+    "Discrezione: le maschere disaccoppiano il participant_id dallo pseudonimo. Il mapping mask->participant e server-side, esposto solo al proprietario e all'host per moderazione. Nessun payload verso il counterpart o broadcast contiene il participant_id di una parte mascherata; l'identita del Cacciatore in un Invito al Dialogo resta mascherata finche il target non rivela.",
+    "Consenso: reveal e contact-consent sono azioni esplicite e tracciate (message system + updated_at). La condivisione del contatto e revocabile in ogni momento (DELETE /contact-consent) con hard-delete immediato del proprio contatto.",
+    "Retention: dialogue_contact ha expires_at=min(event.retention_until, now()+7d) con job di purge dedicato prima della retention evento. Messaggi, maschere, blocchi, preferenze e conversazioni sono eliminati in cascade dal DELETE FROM event (tutte le tabelle hanno event_id FK ON DELETE CASCADE).",
+    "Diritto alla cancellazione (ErasablePort.erase_participant(event_id, participant_id)): messaggi del participant -> tombstone (deleted_at set, body redatto, sender_display->'[cancellato]'); dialogue_mask del participant -> delete; dialogue_contact dove e owner o revealed_to -> hard-delete; conversazioni dove e parte -> anonimizzate (participant_id -> tombstone). Nessun contatto residuo.",
+    "Opt-out ricezione: dialogue_preference (anyone|revealed_only|nobody) + dialogue_block permettono di rifiutare/limitare le missive; rate limit e blocchi mitigano harassment. La policy 'revealed_only' impedisce missive anonime verso chi non le desidera.",
+    "Audit minimo: consensi (reveal/contact via message system + timestamp), blocchi ed erase sono tracciati senza raccogliere dati personali aggiuntivi. Log applicativi non contengono contact_value ne token (foundation 6.6)."
+  ],
+  "open_questions": [
+    "De-duplicazione conversazioni: le missive mascherate verso la stessa coppia sono attualmente multiple (per l'intrigo di piu maschere). Va bene o si vuole un solo thread per coppia con merge alla rivelazione? Impatta uq_conversation_pair_origin.",
+    "Reversibilita: reveal e contact_consent sono modellati monotoni/irreversibili (tranne revoca contatto). Confermare che non si possa 'ri-mascherarsi' dopo aver rivelato.",
+    "Clawback punti: se una conversazione viene bloccata o segnalata DOPO l'award missive_replied, i +10 vanno storno-ati con un delta negativo nel ledger o restano? Attualmente restano.",
+    "Ownership della preferenza missive: dialogue_preference sta in messaging; alternativa e collocarla in profile. Decidere il confine con il dominio profile.",
+    "Gestione chiave di cifratura contatti: la FOUNDATION non specifica KMS. Serve decidere dove vive la chiave (settings statica vs KMS/rotazione) e la strategia di rotazione.",
+    "Interazione con moderation: chi possiede il soft-delete/hide di un messaggio segnalato (messaging via deleted_at vs moderation)? Definire il contratto (probabile: moderation decide, messaging esegue).",
+    "Flusso Invito al Dialogo: e messaging a esporre POST /conversations/invite oppure e discovery/photo a chiamarne solo lo use case interno? Chiarire il boundary e chi valida l'esistenza di photo_id/comment_id (cross-dominio via port).",
+    "Indicatore typing e read receipts: necessari nell'MVP o rinviabili? Impatta carico WS.",
+    "Numero massimo di maschere per participant e loro riuso tra conversazioni diverse (intrigo vs abuso di identita multiple).",
+    "Notifica al bloccato: attualmente silenziosa; confermare che il bloccato non riceva alcun segnale (best practice anti-harassment) ma che i messaggi in coda non vengano recapitati."
+  ]
+}

@@ -1,0 +1,738 @@
+{
+  "domain": "gamification",
+  "summary": "Il dominio gamification e' l'OWNER dell'economia punti dell'evento: consolida tutte le fonti di punti degli altri domini in un unico ledger append-only e idempotente (point_ledger), proietta il saldo su participant.score, mantiene una classifica per-evento in tempo reale, valuta e sblocca titoli/achievement con condizioni (soglia durante la serata, ranking alla chiusura), e gestisce i premi del locale con codici di riscatto. Nessun altro dominio scrive punti: tutti passano dalla porta PointsPort; le metriche di gioco non-punto (foto scattate, volte fotografato, commenti ricevuti...) arrivano via StatsPort e alimentano achievement, gazzettino e risoluzione scommesse. Tutto e' scopato per event_id e cancellabile per GDPR.",
+  "tables": [
+    {
+      "name": "point_ledger",
+      "purpose": "Registro append-only e immutabile di ogni movimento punti dell'evento. UNICA fonte di verita' dei punti (foundation §5.4). Nessun UPDATE/DELETE: le correzioni sono righe compensative (reason=reversal). participant.score e' la proiezione aggregata.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE; beneficiario del delta"
+        },
+        {
+          "name": "delta",
+          "type": "integer",
+          "constraints": "NOT NULL; CHECK (delta <> 0); positivo o negativo"
+        },
+        {
+          "name": "reason",
+          "type": "enum point_reason",
+          "constraints": "NOT NULL; photo_created|subject_guessed|correct_guess|bet_stake|bet_won|bet_refund|missive_replied|dialogue_opened|badge_bonus|manual_host|reversal"
+        },
+        {
+          "name": "source_domain",
+          "type": "text",
+          "constraints": "NOT NULL; dominio emittente (audit): photo|discovery|betting|dialogue|gamification"
+        },
+        {
+          "name": "idempotency_key",
+          "type": "text",
+          "constraints": "NOT NULL; deterministica sull'evento di business (es. 'subject_guessed:{photo_id}:{guesser_id}')"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'; riferimenti opachi (photo_id,bet_id,achievement_id...)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(); tabella append-only, NIENTE updated_at (eccezione al mixin, coerente con foundation §5.4)"
+        }
+      ],
+      "indexes": [
+        "uq_point_ledger_event_idem UNIQUE (event_id, idempotency_key)  -- garanzia idempotenza accrediti",
+        "ix_point_ledger_event_participant (event_id, participant_id)  -- ricalcolo saldo / storico",
+        "ix_point_ledger_event_reason (event_id, reason)",
+        "ix_point_ledger_event_created_at (event_id, created_at)  -- feed gazzettino / audit"
+      ]
+    },
+    {
+      "name": "stat_signal",
+      "purpose": "Registro append-only e idempotente delle metriche di gioco NON legate ai punti (o legate ma da contare a parte). Emesso dai domini via StatsPort. E' la fonte di verita' da cui si proietta participant_stat, esattamente come il ledger e' la fonte di participant.score.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE; soggetto della metrica"
+        },
+        {
+          "name": "signal",
+          "type": "enum stat_signal_kind",
+          "constraints": "NOT NULL; photo_created|subject_of_photo|correct_guess_made|correct_guess_received|comment_made|comment_received|bet_placed|bet_won|missive_sent|missive_replied|dialogue_opened|content_removed"
+        },
+        {
+          "name": "idempotency_key",
+          "type": "text",
+          "constraints": "NOT NULL; deterministica sull'azione (es. 'subject_of_photo:{photo_id}:{participant_id}')"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(); append-only, niente updated_at"
+        }
+      ],
+      "indexes": [
+        "uq_stat_signal_event_idem UNIQUE (event_id, idempotency_key)  -- idempotenza",
+        "ix_stat_signal_event_participant (event_id, participant_id)",
+        "ix_stat_signal_event_signal (event_id, signal)"
+      ]
+    },
+    {
+      "name": "participant_stat",
+      "purpose": "Proiezione denormalizzata dei contatori di gioco per partecipante, aggiornata nella STESSA transazione dell'insert in stat_signal. Alimenta la valutazione degli achievement, il gazzettino e le scommesse tipo 'chi sara' il piu' fotografato'. Ricostruibile via COUNT su stat_signal.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "photos_created",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; foto scattate come Cacciatore"
+        },
+        {
+          "name": "photos_as_subject",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; volte ritratto come Soggetto (metrica 'piu' fotografato')"
+        },
+        {
+          "name": "correct_guesses_made",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; indovinelli corretti fatti (Pettegolo informato)"
+        },
+        {
+          "name": "correct_guesses_received",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; soggetti indovinati sulle MIE foto (successo Cacciatore)"
+        },
+        {
+          "name": "comments_made",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0"
+        },
+        {
+          "name": "comments_received",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; commenti sulle foto in cui sono Soggetto (Soggetto desiderato)"
+        },
+        {
+          "name": "bets_placed",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0"
+        },
+        {
+          "name": "bets_won",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0"
+        },
+        {
+          "name": "missives_sent",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0"
+        },
+        {
+          "name": "missives_replied",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; mie missive che hanno generato risposta"
+        },
+        {
+          "name": "dialogues_opened",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0"
+        },
+        {
+          "name": "last_scoring_at",
+          "type": "timestamptz",
+          "constraints": "NULL; timestamp dell'ultimo accredito positivo, usato come tie-break in classifica"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_participant_stat_event_participant UNIQUE (event_id, participant_id)",
+        "ix_participant_stat_event_subject (event_id, photos_as_subject DESC)  -- metrica scommesse/gazzettino"
+      ]
+    },
+    {
+      "name": "achievement",
+      "purpose": "Catalogo statico (config) delle definizioni di titoli/achievement e delle loro condizioni di sblocco. NON scopato per evento: e' configurazione senza dati personali, seedata via migration; percio' esente dal purge di retention. Referenziato dagli sblocchi per-evento.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "code",
+          "type": "text",
+          "constraints": "NOT NULL UNIQUE; slug stabile es. 'hunter_most_astute','gossip_best_informed','subject_most_desired','first_photo','night_monarch'"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "constraints": "NOT NULL; display IT es. 'Il Cacciatore piu' Astuto'"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "category",
+          "type": "enum achievement_category",
+          "constraints": "NOT NULL; hunter|gossip|subject|social|milestone|overall"
+        },
+        {
+          "name": "trigger_type",
+          "type": "enum achievement_trigger",
+          "constraints": "NOT NULL; threshold (durante evento) | ranking (a chiusura) | manual (host)"
+        },
+        {
+          "name": "stat_key",
+          "type": "text",
+          "constraints": "NULL; colonna di participant_stat o 'score' su cui valutare (obbligatoria se threshold/ranking)"
+        },
+        {
+          "name": "threshold_value",
+          "type": "integer",
+          "constraints": "NULL; soglia per trigger_type=threshold; CHECK (trigger_type<>'threshold' OR threshold_value IS NOT NULL)"
+        },
+        {
+          "name": "target_rank",
+          "type": "integer",
+          "constraints": "NULL DEFAULT 1; posizione da premiare per trigger_type=ranking"
+        },
+        {
+          "name": "bonus_points",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; punti bonus accreditati allo sblocco (reason=badge_bonus)"
+        },
+        {
+          "name": "is_title",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT true; titolo di prestigio vs micro-badge"
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_achievement_code UNIQUE (code)",
+        "ix_achievement_trigger_type (trigger_type)"
+      ]
+    },
+    {
+      "name": "participant_achievement",
+      "purpose": "Sblocco di un achievement per un partecipante in un evento (macchina a stati locked->unlocked, unico verso). Idempotente per (event,participant,achievement).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "achievement_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->achievement.id ON DELETE RESTRICT"
+        },
+        {
+          "name": "unlocked_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "context",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'; valore metrica e rank al momento dello sblocco"
+        },
+        {
+          "name": "ledger_id",
+          "type": "uuid",
+          "constraints": "NULL; FK->point_ledger.id; riga del bonus punti (se bonus_points>0)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_participant_achievement UNIQUE (event_id, participant_id, achievement_id)  -- idempotenza sblocco",
+        "ix_participant_achievement_event_ach (event_id, achievement_id)  -- gazzettino"
+      ]
+    },
+    {
+      "name": "prize",
+      "purpose": "Premio del locale definito dall'host per l'evento (giro di drink, invito evento, custom). Puo' essere assegnato manualmente, per rank di classifica o per soglia punti.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "constraints": "NULL"
+        },
+        {
+          "name": "kind",
+          "type": "enum prize_kind",
+          "constraints": "NOT NULL; drink_round|event_invite|custom"
+        },
+        {
+          "name": "award_mode",
+          "type": "enum prize_award_mode",
+          "constraints": "NOT NULL DEFAULT 'manual'; manual|auto_rank|auto_threshold"
+        },
+        {
+          "name": "rank_from",
+          "type": "integer",
+          "constraints": "NULL; per auto_rank (es. 1)"
+        },
+        {
+          "name": "rank_to",
+          "type": "integer",
+          "constraints": "NULL; per auto_rank (es. 3); CHECK (rank_to IS NULL OR rank_to>=rank_from)"
+        },
+        {
+          "name": "threshold_points",
+          "type": "integer",
+          "constraints": "NULL; per auto_threshold"
+        },
+        {
+          "name": "quantity",
+          "type": "integer",
+          "constraints": "NULL; stock limitato; NULL=illimitato; CHECK (quantity IS NULL OR quantity>0)"
+        },
+        {
+          "name": "awarded_count",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; contatore assegnati (<= quantity)"
+        },
+        {
+          "name": "status",
+          "type": "enum prize_status",
+          "constraints": "NOT NULL DEFAULT 'draft'; draft|active|archived"
+        },
+        {
+          "name": "created_by",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id (host); audit"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "ix_prize_event_status (event_id, status)"
+      ]
+    },
+    {
+      "name": "prize_award",
+      "purpose": "Assegnazione di un premio a un partecipante, con codice di riscatto opaco. Macchina a stati pending->redeemed|revoked. Il codice viene mostrato allo staff del locale per l'evasione.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "prize_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->prize.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "status",
+          "type": "enum prize_award_status",
+          "constraints": "NOT NULL DEFAULT 'pending'; pending|redeemed|revoked"
+        },
+        {
+          "name": "redemption_code",
+          "type": "text",
+          "constraints": "NOT NULL; opaco, breve (es. 6 char), UNIQUE globale"
+        },
+        {
+          "name": "rank_at_award",
+          "type": "integer",
+          "constraints": "NULL; posizione in classifica al momento dell'assegnazione (auto_rank)"
+        },
+        {
+          "name": "awarded_by",
+          "type": "uuid",
+          "constraints": "NULL; FK->participant.id (host); NULL se assegnazione automatica"
+        },
+        {
+          "name": "awarded_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "redeemed_at",
+          "type": "timestamptz",
+          "constraints": "NULL"
+        },
+        {
+          "name": "redeemed_by",
+          "type": "uuid",
+          "constraints": "NULL; FK->participant.id (host che ha evaso)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_prize_award_redemption_code UNIQUE (redemption_code)",
+        "uq_prize_award_prize_participant UNIQUE (event_id, prize_id, participant_id)  -- un'istanza di premio per persona",
+        "ix_prize_award_event_participant (event_id, participant_id)"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/leaderboard",
+      "purpose": "Classifica per-evento: top N + la mia posizione. Fonte di lettura per la UI e per il resync al reconnect WS.",
+      "auth": "participant",
+      "request": "query: ?top=<1..50, default 10>. event_id ricavato dal token (mai dal client).",
+      "response": "200 {top:[{rank,participant_id,pseudonym,noble_title,score}], me:{rank,score,participant_id}, total_participants, generation}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/me/points",
+      "purpose": "Saldo corrente e storico movimenti punti del partecipante autenticato.",
+      "auth": "participant",
+      "request": "query paginazione cursor: ?limit=<1..100,default20>&cursor=... Ordine created_at DESC,id DESC.",
+      "response": "200 {score, items:[{id,delta,reason,source_domain,metadata,created_at}], page:{next_cursor,limit}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/achievements",
+      "purpose": "Catalogo dei titoli/achievement attivi (definizioni) per mostrare obiettivi e progressi.",
+      "auth": "participant",
+      "request": "nessun body.",
+      "response": "200 {items:[{code,name,description,category,trigger_type,is_title,bonus_points,threshold_value|null}]}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/me/achievements",
+      "purpose": "Achievement sbloccati dal partecipante + progresso verso quelli a soglia.",
+      "auth": "participant",
+      "request": "nessun body.",
+      "response": "200 {unlocked:[{code,name,category,is_title,unlocked_at,bonus_points,context}], in_progress:[{code,name,stat_key,current,threshold}]}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/prizes",
+      "purpose": "Elenco dei premi del locale attivi per l'evento (vetrina).",
+      "auth": "participant",
+      "request": "nessun body.",
+      "response": "200 {items:[{id,name,description,kind,award_mode,rank_from,rank_to,threshold_points,remaining|null}]}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/me/prizes",
+      "purpose": "Premi assegnati al partecipante, con codice di riscatto da mostrare allo staff.",
+      "auth": "participant",
+      "request": "nessun body.",
+      "response": "200 {items:[{prize_award_id,prize:{name,kind},status,redemption_code,awarded_at,redeemed_at|null}]}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/prizes",
+      "purpose": "Host crea un premio del locale (in draft).",
+      "auth": "host",
+      "request": "{name, description?, kind, award_mode, rank_from?, rank_to?, threshold_points?, quantity?}",
+      "response": "201 {id, status:'draft', ...}"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/prizes/{id}",
+      "purpose": "Host aggiorna un premio o lo attiva/archivia (transizione status).",
+      "auth": "host",
+      "request": "{name?, description?, quantity?, status?:'active'|'archived', ...} (scoped a event_id del token)",
+      "response": "200 {id, status, ...}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/prizes/{id}/awards",
+      "purpose": "Host assegna manualmente un premio a un partecipante; genera redemption_code e notifica.",
+      "auth": "host",
+      "request": "{participant_id, idempotency_key?}",
+      "response": "201 {prize_award_id, participant_id, redemption_code, status:'pending'} | 409 prize.out_of_stock"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/prize-awards/{id}/redeem",
+      "purpose": "Host/staff evade il premio contro il codice mostrato dal partecipante (pending->redeemed).",
+      "auth": "host",
+      "request": "{redemption_code} (verifica match).",
+      "response": "200 {prize_award_id, status:'redeemed', redeemed_at} | 409 prize.already_redeemed"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/prize-awards/{id}/revoke",
+      "purpose": "Host revoca un'assegnazione (pending->revoked); invalida il codice.",
+      "auth": "host",
+      "request": "{reason?}",
+      "response": "200 {prize_award_id, status:'revoked'}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/points/adjustments",
+      "purpose": "Host applica una rettifica punti manuale (reason=manual_host), idempotente.",
+      "auth": "host",
+      "request": "{participant_id, delta (<>0), note?, idempotency_key}",
+      "response": "201 {ledger_id, participant_id, delta, new_score} | 200 (no-op se idempotency_key gia' usata)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/events/{id}/gamification/finalize",
+      "purpose": "Calcola gli achievement di tipo ranking e assegna i premi auto_rank/auto_threshold alla chiusura evento. Idempotente; tipicamente invocato dall'hook di close_event (identity) o manualmente dall'host.",
+      "auth": "host",
+      "request": "nessun body; usa i dati consolidati (participant_stat, participant.score).",
+      "response": "200 {ranking_achievements_unlocked:N, prizes_awarded:M, bonus_points_total:K}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/host/leaderboard",
+      "purpose": "Classifica completa (tutti i partecipanti) per la console host, paginata.",
+      "auth": "host",
+      "request": "query cursor: ?limit=&cursor=",
+      "response": "200 {items:[{rank,participant_id,pseudonym,noble_title,score,badges_count}], page:{next_cursor,limit}}"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "gamification.points_awarded",
+      "direction": "server->client",
+      "payload": "{delta, new_score, reason, source_domain, ref:{photo_id?|bet_id?|missive_id?|achievement_id?}, ts}",
+      "when": "Dopo il commit di award_points, recapito MIRATO (send_to_participant) al solo beneficiario. Alimenta l'animazione punti nella UI."
+    },
+    {
+      "name": "gamification.leaderboard_updated",
+      "direction": "server->client",
+      "payload": "{generation, top:[{rank,participant_id,pseudonym,noble_title,score}], changed:[{participant_id,score,rank}]}",
+      "when": "Dopo ogni variazione di saldo, in BROADCAST sulla room dell'evento, con debounce (~750ms) per evitare spam. Contiene solo participant_id/pseudonimo/titolo/punteggio."
+    },
+    {
+      "name": "gamification.badge_unlocked",
+      "direction": "server->client",
+      "payload": "{achievement:{code,name,category,is_title}, bonus_points, context:{metric_value,rank?}, ts}",
+      "when": "Alla creazione di participant_achievement, recapito MIRATO all'utente che ha sbloccato."
+    },
+    {
+      "name": "gamification.badge_announced",
+      "direction": "server->client",
+      "payload": "{achievement:{code,name,category}, participant:{participant_id,pseudonym,noble_title}}",
+      "when": "Solo per achievement is_title=true: annuncio discreto in BROADCAST alla room (tono 'gazzettino'). Mai identita' reale."
+    },
+    {
+      "name": "gamification.prize_awarded",
+      "direction": "server->client",
+      "payload": "{prize_award_id, prize:{name,kind}, redemption_code, ts}",
+      "when": "Alla creazione di prize_award, recapito MIRATO al vincitore (il codice non e' mai in broadcast)."
+    }
+  ],
+  "rules": [
+    "OWNERSHIP: gamification e' l'unico dominio che scrive point_ledger e participant.score. Gli altri domini accreditano SOLO via porta PointsPort.award_points(event_id, participant_id, delta, reason, source_domain, idempotency_key, metadata). Nessuna contabilita' parallela altrove.",
+    "TRANSAZIONE ATOMICA (accredito): award_points esegue in un'unica transazione: INSERT point_ledger (ON CONFLICT (event_id,idempotency_key) DO NOTHING) e, se ha inserito, UPDATE participant SET score = score + :delta, last_scoring_at=now() (se delta>0). Ordine foundation: commit DB -> poi pubblicazione EventBus. Il ledger e' la verita', il realtime e' best-effort.",
+    "IDEMPOTENZA: ogni accredito ha idempotency_key deterministica sull'evento di business (es. 'subject_guessed:{photo_id}:{guesser_id}', 'bet_won:{bet_id}:{pid}', 'badge:{achievement_id}:{pid}'). Un secondo award con la stessa chiave e' no-op: sicuro per retry, redelivery WS e job ripetuti.",
+    "RICALCOLO SALDO: participant.score e' proiezione; il saldo canonico e' SELECT sum(delta) FROM point_ledger WHERE event_id=? AND participant_id=? GROUP BY participant_id. La classifica legge participant.score (veloce).",
+    "CONSOLIDAMENTO STAT (non-punto): metriche di gioco arrivano via StatsPort.record_signal(...) che fa INSERT stat_signal idempotente + UPDATE participant_stat nella stessa transazione. participant_stat e' proiettabile con COUNT su stat_signal.",
+    "FORMULA PUNTI FOTO (Cacciatore): per ogni indovinello CORRETTO ricevuto su una sua foto, il Cacciatore guadagna P_GUESS_HUNTER (default 15) con CAP per-foto CAP_HUNTER (default 60). award incrementale: grant = min(P_GUESS_HUNTER, CAP_HUNTER - gia_accreditato_su_quella_foto); se grant>0 accredita. Chiave 'subject_guessed:{photo_id}:{guesser_id}'.",
+    "FORMULA PUNTI INDOVINO (guesser): chi indovina il Soggetto guadagna P_GUESS_CORRECT (default 20); il PRIMO indovino corretto su quella foto guadagna in piu' BONUS_FIRST (default 10). delta_guesser = P_GUESS_CORRECT + (is_first ? BONUS_FIRST : 0). Chiave 'correct_guess:{photo_id}:{guesser_id}'.",
+    "FORMULA ALTRE FONTI: photo_created = +P_PHOTO (default 5); missive_replied = +P_MISSIVE_REPLIED (default 5, quando una missiva genera risposta); dialogue_opened = +P_DIALOGUE_HUNTER (25) al Cacciatore/commentatore invitato e +P_DIALOGUE_SUBJECT (10) al Soggetto che apre. Tutte le costanti sono override-abili in event.settings.gamification.points.",
+    "RISOLUZIONE SCOMMESSE (parimutuel, formula consolidata qui, calcolo di dominio betting): Pool = somma di tutte le puntate del round; WinPool = somma delle puntate sull'esito vincente; payout_i = floor(stake_i * (Pool*(1-rake)) / WinPool) per ogni vincitore; se WinPool=0 -> refund_i = stake_i. A ledger: alla giocata reason=bet_stake delta=-stake (chiave 'bet_stake:{bet_id}:{pid}'); al settle reason=bet_won delta=+payout_i (chiave 'bet_won:{bet_id}:{pid}'); refund reason=bet_refund. Profitto netto vincitore = payout_i - stake_i. rake default 0.",
+    "CLASSIFICA / RANK: rank = ROW_NUMBER() OVER (ORDER BY participant.score DESC, participant_stat.last_scoring_at ASC NULLS LAST, participant.created_at ASC). Tie-break: chi ha raggiunto prima il punteggio, poi seniority di join. Broadcast top-N + delta del changed, con debounce.",
+    "ACHIEVEMENT A SOGLIA (threshold): ad ogni aggiornamento di participant_stat, se stat[stat_key] >= threshold_value e non gia' sbloccato -> INSERT participant_achievement (uq idempotente) + eventuale award badge_bonus (chiave 'badge:{achievement_id}:{pid}') + emit badge_unlocked. Es. first_photo(photos_created>=1), night_gossiper(correct_guesses_made>=5).",
+    "ACHIEVEMENT A RANKING (chiusura): in finalize, per ogni achievement ranking si ordina la metrica stat_key DESC su tutti i partecipanti e si sblocca chi e' in posizione <= target_rank. Es. 'Il Cacciatore piu' Astuto'=max correct_guesses_received; 'Il Pettegolo piu' Informato'=max correct_guesses_made; 'Il Soggetto piu' Desiderato'=max (photos_as_subject pesato + comments_received); 'Monarca della Serata'=rank 1 su score. Policy pareggi: tutti i pari-merito sbloccano (configurabile).",
+    "MACCHINA A STATI ACHIEVEMENT: locked -> unlocked (terminale, mai re-lock). Idempotenza garantita da uq_participant_achievement.",
+    "MACCHINA A STATI PREMIO (catalogo): draft -> active -> archived. Assegnazione bloccata se status<>active o awarded_count>=quantity (409 prize.out_of_stock).",
+    "MACCHINA A STATI PRIZE_AWARD: pending -> redeemed (evasione con codice) | pending -> revoked (host/erase). L'incremento prize.awarded_count e la creazione prize_award avvengono in transazione con guardia sullo stock. redemption_code opaco e UNIQUE.",
+    "REVERSAL SU RIMOZIONE CONTENUTO: su moderation.photo_removed, gamification emette righe compensative (reason=reversal, delta = -delta_originale, chiave 'reversal:{ledger_id}') per gli accrediti collegati (metadata.photo_id) e decrementa i relativi contatori via stat_signal signal=content_removed. Mantiene l'economia equa senza cancellare righe storiche. Il ledger resta append-only.",
+    "SCOPING: ogni query filtra per event_id dal token (SessionContext). Nessun endpoint accetta event_id/participant_id arbitrari dal client tranne l'host su participant del proprio evento.",
+    "PORTE ESPOSTE (core): PointsPort.award_points / PointsPort.get_balance (per il controllo saldo di betting); StatsPort.record_signal; ErasablePort.erase_participant. Definite come typing.Protocol in gamification/core, implementate in gamification/infrastructure; i domini chiamanti ricevono le porte per DI, mai import di models."
+  ],
+  "points": [
+    {
+      "action": "photo_created — pubblicazione Foto Whisper (dominio photo)",
+      "points": "+P_PHOTO (default 5)",
+      "notes": "reason=photo_created, source=photo, key 'photo_created:{photo_id}'. Valore basso anti-farming; la creativita' paga davvero via indovinelli/scommesse."
+    },
+    {
+      "action": "subject_guessed — un indovino azzecca il Soggetto di una tua foto (accredito al Cacciatore)",
+      "points": "+min(15/guess, cap 60/foto)",
+      "notes": "reason=subject_guessed, source=discovery, key 'subject_guessed:{photo_id}:{guesser_id}'. CAP per-foto evita l'abuso di foto molto ovvie."
+    },
+    {
+      "action": "correct_guess — indovini correttamente il Soggetto (accredito al guesser)",
+      "points": "+20 (+10 se sei il primo)",
+      "notes": "reason=correct_guess, source=discovery, key 'correct_guess:{photo_id}:{guesser_id}'. Bonus primo indovino premia velocita'."
+    },
+    {
+      "action": "missive_replied — una tua Missiva Segreta genera una risposta",
+      "points": "+P_MISSIVE_REPLIED (default 5)",
+      "notes": "reason=missive_replied, source=dialogue, key 'missive_replied:{missive_id}'. Premia missive che creano intrigo, non lo spam."
+    },
+    {
+      "action": "dialogue_opened — il Soggetto apre una chat (invito al dialogo accettato)",
+      "points": "Cacciatore/invitato +25, Soggetto +10",
+      "notes": "reason=dialogue_opened, source=dialogue, chiavi 'dialogue_opened:{dialogue_id}:{role}'. Nessun contatto reale nel payload/metadata."
+    },
+    {
+      "action": "bet_stake — piazzi una scommessa dell'Alta Societa'",
+      "points": "-stake",
+      "notes": "reason=bet_stake, source=betting, key 'bet_stake:{bet_id}:{pid}'. betting verifica saldo via PointsPort.get_balance; min/max stake da settings."
+    },
+    {
+      "action": "bet_won — vinci il round (payout parimutuel)",
+      "points": "+floor(stake*(Pool*(1-rake))/WinPool)",
+      "notes": "reason=bet_won, source=betting, key 'bet_won:{bet_id}:{pid}'. WinPool=0 -> bet_refund +stake."
+    },
+    {
+      "action": "badge_bonus — sblocco achievement/titolo con bonus",
+      "points": "+achievement.bonus_points",
+      "notes": "reason=badge_bonus, source=gamification, key 'badge:{achievement_id}:{pid}'. 0 se il badge e' solo onorifico."
+    },
+    {
+      "action": "manual_host — rettifica manuale dell'host",
+      "points": "+/- delta",
+      "notes": "reason=manual_host, source=gamification, key esplicita dal client. Attore host tracciato in metadata per audit GDPR."
+    },
+    {
+      "action": "reversal — storno per contenuto rimosso/moderato",
+      "points": "-delta_originale",
+      "notes": "reason=reversal, source=gamification, key 'reversal:{ledger_id}'. Storno via riga compensativa, mai DELETE."
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: gamification memorizza solo contatori numerici, punti e riferimenti opachi (photo_id, bet_id). Nessun nome reale, contatto o testo personale. I payload REST/WS espongono solo participant_id, pseudonimo, noble_title, score.",
+    "Scoping + retention: point_ledger, stat_signal, participant_stat, participant_achievement, prize, prize_award hanno tutti event_id FK ON DELETE CASCADE -> il job di retention che fa DELETE FROM event li elimina in hard-delete. Nessun artefatto S3 di competenza del dominio.",
+    "Catalogo achievement: tabella statica di configurazione senza dati personali, NON scopata per evento e correttamente esclusa dal purge di retention.",
+    "Diritto alla cancellazione (ErasablePort.erase_participant(event_id, participant_id)): hard-delete delle righe del partecipante in point_ledger, stat_signal, participant_stat, participant_achievement; le prize_award pending vengono revocate (codice invalidato) e rimosse. Gli aggregati del gazzettino gia' pubblicati sono snapshot immutabili detenuti dal dominio gazette, quindi la history resta valida. Dopo l'erase si ricalcola/broadcast la classifica.",
+    "Discrezione: la classifica e gli eventi WS non collegano mai il Cacciatore alla foto ne' espongono contatti; badge_announced (titoli in broadcast) usa solo pseudonimo/titolo. redemption_code e' opaco, non e' dato personale.",
+    "Audit minimo: rettifiche manual_host e riscatti premio registrano attore host (participant_id) + timestamp per dimostrabilita' GDPR, senza raccogliere dati aggiuntivi. I log applicativi non contengono token ne' contatti reali.",
+    "Nessuna aggregazione cross-evento: punteggi, badge e premi vivono e muoiono con l'evento; non esiste una leaderboard globale che sopravviva alla retention."
+  ],
+  "open_questions": [
+    "Valori/cap definitivi dello scoring (P_PHOTO, P_GUESS_HUNTER, CAP_HUNTER, BONUS_FIRST, punti dialogo): i default proposti vanno tarati con il product per bilanciare la serata.",
+    "Storno su moderazione: confermare se moderation.photo_removed deve stornare i punti gia' accreditati (proposta: reversal + decremento stat) o lasciarli per non 'punire' retroattivamente i giocatori.",
+    "Controllo saldo scommesse: si conferma PointsPort.get_balance come porta di lettura per betting, e si permette saldo negativo (solo via reversal/rettifica) o lo si vieta con un CHECK?",
+    "Visibilita' classifica: mostrare a tutti solo top-N + propria posizione (default, tono piu' 'da salotto') oppure classifica completa a tutti i partecipanti?",
+    "Policy pareggi per i titoli ranking: sbloccare a tutti i pari-merito (proposta, generosa/festosa) o singolo vincitore con tie-break deterministico?",
+    "Relazione tra achievement 'titoli' e noble_title del profilo: si assume che i titoli-achievement siano un layer di riconoscimento separato dal titolo nobiliare del profilo. Da confermare con il dominio profile.",
+    "Premi a soglia in tempo reale (auto_threshold durante la serata) vs solo assegnazioni a chiusura: definire timing e se un premio a soglia limitato in stock va assegnato al primo che raggiunge la soglia.",
+    "Trigger di finalize: si assume un hook da identity.close_event verso gamification.finalize. Serve un contratto esplicito (EventBus event 'event.closed' consumato) o l'host lo lancia manualmente dalla console?",
+    "Debounce e top_n della classifica realtime: confermare 750ms / top 10 come default in settings.",
+    "Formato/lunghezza del redemption_code e se serve una scadenza del codice separata dalla retention evento (es. drink riscattabile solo entro fine serata)."
+  ]
+}

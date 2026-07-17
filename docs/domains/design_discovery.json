@@ -1,0 +1,478 @@
+{
+  "domain": "discovery",
+  "summary": "Il dominio discovery gestisce la \"Scoperta\" attorno a ogni Foto Whisper: commenti nel feed, indovinelli strutturati su chi sia il Soggetto, assegnazione idempotente dei punti al Cacciatore e a chi indovina, rivelazione volontaria del Soggetto e \"Invito al Dialogo\" che fa da ponte verso il dominio dialogue. Include il motore anti-abuso dei guess (limite tentativi, cooldown, divieti di auto-guess) e mantiene una proiezione di stato per foto. Non possiede le foto (dominio photo) ne il ledger punti (dominio gamification): legge il Soggetto/Cacciatore via PhotoPort e accredita via PointsPort, restando entro clean architecture core/+infrastructure/ e scoping per event_id.",
+  "tables": [
+    {
+      "name": "whisper_comment",
+      "purpose": "Commenti social/hint sul feed di una Foto Whisper. Prosa libera con cui i nobili discutono e insinuano chi sia il Soggetto (i guess veri sono strutturati in whisper_guess). Visibili a tutti i partecipanti dell'evento.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE (scoping tenant + retention)"
+        },
+        {
+          "name": "photo_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->photo.id ON DELETE CASCADE (owner: dominio photo)"
+        },
+        {
+          "name": "author_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "body",
+          "type": "text",
+          "constraints": "NOT NULL; CHECK (char_length(btrim(body)) BETWEEN 1 AND 500)"
+        },
+        {
+          "name": "status",
+          "type": "enum comment_status('visible','hidden','deleted')",
+          "constraints": "NOT NULL DEFAULT 'visible'. 'hidden' = nascosto da moderation; 'deleted' = soft-delete autore"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (TimestampMixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (TimestampMixin)"
+        }
+      ],
+      "indexes": [
+        "ix_whisper_comment_photo_id (photo_id)",
+        "ix_whisper_comment_event_photo_created (event_id, photo_id, created_at DESC) per listing paginato del feed commenti",
+        "ix_whisper_comment_author_participant_id (author_participant_id) per erase/moderazione"
+      ]
+    },
+    {
+      "name": "whisper_guess",
+      "purpose": "Indovinello strutturato: il partecipante afferma che il Soggetto della foto e uno specifico partecipante candidato. Correttezza calcolata a insert-time contro photo.subject_participant_id (letto via PhotoPort). Base per punti e anti-abuso.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "photo_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->photo.id ON DELETE CASCADE"
+        },
+        {
+          "name": "guesser_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE (chi indovina)"
+        },
+        {
+          "name": "guessed_subject_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE (candidato indicato)"
+        },
+        {
+          "name": "is_correct",
+          "type": "boolean",
+          "constraints": "NOT NULL. Computato = (guessed_subject_participant_id == subject del photo)"
+        },
+        {
+          "name": "guess_rank",
+          "type": "integer",
+          "constraints": "NULL; valorizzato solo se is_correct = ordine progressivo tra i guess corretti della foto (1=primo). CHECK (guess_rank IS NULL OR guess_rank > 0)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "uq_whisper_guess_photo_guesser_candidate UNIQUE (photo_id, guesser_participant_id, guessed_subject_participant_id) — vieta di ripetere lo stesso candidato",
+        "ix_whisper_guess_photo_guesser (photo_id, guesser_participant_id) per conteggio tentativi/cooldown",
+        "ix_whisper_guess_photo_correct (photo_id) WHERE is_correct — conteggio corretti e rank",
+        "ix_whisper_guess_event_id (event_id)"
+      ]
+    },
+    {
+      "name": "whisper_discovery_state",
+      "purpose": "Proiezione 1:1 per foto dello stato di Scoperta (contatori guess, solve, stato di rivelazione del Soggetto). Denormalizzazione di lettura per feed/broadcast; fonte di verita dei punti resta il ledger, dei guess la tabella whisper_guess.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "photo_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->photo.id ON DELETE CASCADE; UNIQUE (uq_whisper_discovery_state_photo_id) — una riga per foto"
+        },
+        {
+          "name": "total_guess_count",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; CHECK (total_guess_count >= 0)"
+        },
+        {
+          "name": "correct_guess_count",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0; CHECK (correct_guess_count >= 0)"
+        },
+        {
+          "name": "first_correct_guesser_id",
+          "type": "uuid",
+          "constraints": "NULL; FK->participant.id ON DELETE SET NULL (mantiene aggregato dopo erase)"
+        },
+        {
+          "name": "solved_at",
+          "type": "timestamptz",
+          "constraints": "NULL; valorizzato al primo guess corretto (transizione unsolved->solved, one-shot)"
+        },
+        {
+          "name": "reveal_state",
+          "type": "enum discovery_reveal_state('hidden','revealed')",
+          "constraints": "NOT NULL DEFAULT 'hidden'"
+        },
+        {
+          "name": "revealed_at",
+          "type": "timestamptz",
+          "constraints": "NULL; valorizzato quando il Soggetto rivela"
+        },
+        {
+          "name": "reveal_message",
+          "type": "text",
+          "constraints": "NULL; CHECK (reveal_message IS NULL OR char_length(reveal_message) <= 280)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "uq_whisper_discovery_state_photo_id UNIQUE (photo_id)",
+        "ix_whisper_discovery_state_event_id (event_id)",
+        "ix_whisper_discovery_state_event_solved (event_id, solved_at) per classifiche/gazzettino"
+      ]
+    },
+    {
+      "name": "whisper_invite",
+      "purpose": "'Invito al Dialogo' generato a partire da una Whisper: il Soggetto (o eccezionalmente altro attore, vedi open questions) invita un partecipante (il Cacciatore, un buon indovino o un buon commentatore) ad aprire una chat privata. E' l'artefatto-ponte: all'accettazione discovery emette un DomainEvent che il dominio dialogue consuma per aprire la chat e sbloccare lo scambio contatti.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "photo_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->photo.id ON DELETE CASCADE"
+        },
+        {
+          "name": "inviter_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE (normalmente il Soggetto)"
+        },
+        {
+          "name": "invitee_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->participant.id ON DELETE CASCADE (Cacciatore o buon indovino/commentatore); CHECK (invitee_participant_id <> inviter_participant_id)"
+        },
+        {
+          "name": "context",
+          "type": "enum invite_context('hunter','guesser','commenter')",
+          "constraints": "NOT NULL — perche e stato invitato (audit/UX)"
+        },
+        {
+          "name": "status",
+          "type": "enum invite_status('pending','accepted','declined','cancelled','expired')",
+          "constraints": "NOT NULL DEFAULT 'pending'"
+        },
+        {
+          "name": "message",
+          "type": "text",
+          "constraints": "NULL; CHECK (message IS NULL OR char_length(message) <= 280)"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamptz",
+          "constraints": "NULL; scadenza invito (default now()+2h, mai oltre event.ends_at)"
+        },
+        {
+          "name": "responded_at",
+          "type": "timestamptz",
+          "constraints": "NULL; valorizzato su accept/decline/cancel/expire"
+        },
+        {
+          "name": "chat_id",
+          "type": "uuid",
+          "constraints": "NULL; riferimento alla chat aperta dal dominio dialogue (nessuna FK cross-dominio, accoppiamento lasco)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate"
+        }
+      ],
+      "indexes": [
+        "uq_whisper_invite_photo_inviter_invitee UNIQUE (photo_id, inviter_participant_id, invitee_participant_id) — no inviti duplicati",
+        "ix_whisper_invite_event_invitee_status (event_id, invitee_participant_id, status) per 'inviti ricevuti'",
+        "ix_whisper_invite_event_inviter (event_id, inviter_participant_id) per 'inviti inviati'",
+        "ix_whisper_invite_expires (expires_at) WHERE status='pending' per job di scadenza"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{photo_id}/comments",
+      "purpose": "Aggiunge un commento social/hint a una Whisper. Vietato se evento non 'open' o foto rimossa (verifica via PhotoPort).",
+      "auth": "participant",
+      "request": "body JSON {\"body\": string 1..500}. photo_id in path; event_id dal token",
+      "response": "201 {id, photo_id, author_participant_id, author_pseudonym, body, status, created_at}. Errori: 404 discovery.photo_not_found (fuori scope evento), 410 event.closed, 400 discovery.comment_empty"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/{photo_id}/comments",
+      "purpose": "Lista paginata (cursor) dei commenti visibili di una foto, ordine created_at DESC.",
+      "auth": "participant",
+      "request": "query ?limit=1..100(def 20)&cursor=<opaque>",
+      "response": "200 {items:[{id, author_participant_id, author_pseudonym, body, created_at}], page:{next_cursor, limit}}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/comments/{comment_id}",
+      "purpose": "L'autore cancella (soft) un proprio commento; status->'deleted'. La rimozione per moderazione e nel dominio moderation.",
+      "auth": "participant",
+      "request": "nessun body",
+      "response": "204. Errori: 403 discovery.not_comment_author, 404 discovery.comment_not_found"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{photo_id}/guesses",
+      "purpose": "Sottomette un indovinello sul Soggetto. Applica anti-abuso (limite tentativi, cooldown, divieti). Se corretto assegna punti (guesser + Cacciatore) e aggiorna discovery_state.",
+      "auth": "participant",
+      "request": "body {\"guessed_subject_participant_id\": uuid}",
+      "response": "201 {id, is_correct, guess_rank|null, attempts_left, points_awarded}. Errori: 403 discovery.self_guess_forbidden (candidato==guesser o guesser e' il Soggetto/Cacciatore), 409 discovery.duplicate_guess, 429 discovery.guess_cooldown, 409 discovery.guess_limit_reached, 410 event.closed, 404 discovery.photo_not_available (foto rimossa)"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/{photo_id}/guesses/me",
+      "purpose": "I propri guess su una foto con tentativi residui e stato.",
+      "auth": "participant",
+      "request": "nessun body",
+      "response": "200 {attempts_left, has_correct, guesses:[{guessed_subject_participant_id, is_correct, guess_rank, created_at}]}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/{photo_id}/discovery",
+      "purpose": "Stato pubblico di Scoperta della foto senza svelare il Soggetto (a meno che rivelato) ne il Cacciatore.",
+      "auth": "participant",
+      "request": "nessun body",
+      "response": "200 {photo_id, solved:boolean, correct_guess_count, total_guess_count, reveal_state, subject_participant_id (solo se reveal_state='revealed'), subject_pseudonym (solo se revealed), revealed_at, reveal_message}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{photo_id}/reveal",
+      "purpose": "Il Soggetto rivela volontariamente di essere il soggetto della Whisper. Transizione reveal_state hidden->revealed; broadcast alla room.",
+      "auth": "participant",
+      "request": "body {\"message\"?: string <=280}. Il chiamante deve essere il subject (verifica via PhotoPort)",
+      "response": "200 {photo_id, reveal_state:'revealed', revealed_at, message}. Errori: 403 discovery.not_subject, 409 discovery.already_revealed, 410 event.closed"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{photo_id}/invites",
+      "purpose": "Il Soggetto emette un 'Invito al Dialogo' verso il Cacciatore o un buon indovino/commentatore.",
+      "auth": "participant",
+      "request": "body {\"invitee_participant_id\": uuid, \"context\": 'hunter'|'guesser'|'commenter', \"message\"?: string <=280}",
+      "response": "201 {id, photo_id, invitee_participant_id, context, status:'pending', expires_at}. Errori: 403 discovery.not_subject, 409 discovery.invite_exists, 400 discovery.invalid_invitee (self o non partecipante evento), 410 event.closed"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/invites",
+      "purpose": "I propri inviti (ricevuti e inviati) con filtri.",
+      "auth": "participant",
+      "request": "query ?direction=received|sent&status=<invite_status>&limit&cursor",
+      "response": "200 {items:[{id, photo_id, direction, counterpart_participant_id, counterpart_pseudonym, context, status, message, chat_id, created_at}], page:{next_cursor, limit}}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/invites/{invite_id}/accept",
+      "purpose": "L'invitato accetta: status->'accepted', emette DomainEvent consumato da dialogue che apre la chat e restituisce chat_id (best-effort, poi via WS).",
+      "auth": "participant",
+      "request": "nessun body",
+      "response": "200 {id, status:'accepted', chat_id}. Errori: 403 discovery.not_invitee, 409 discovery.invite_not_pending, 410 discovery.invite_expired"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/invites/{invite_id}/decline",
+      "purpose": "L'invitato rifiuta l'invito: status->'declined'.",
+      "auth": "participant",
+      "request": "nessun body",
+      "response": "200 {id, status:'declined'}. Errori: 403 discovery.not_invitee, 409 discovery.invite_not_pending"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/invites/{invite_id}/cancel",
+      "purpose": "L'inviter annulla un invito pending: status->'cancelled'.",
+      "auth": "participant",
+      "request": "nessun body",
+      "response": "200 {id, status:'cancelled'}. Errori: 403 discovery.not_inviter, 409 discovery.invite_not_pending"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "discovery.comment_added",
+      "direction": "server->client",
+      "payload": "{photo_id, comment_id, author_participant_id, author_pseudonym, body, created_at}",
+      "when": "Broadcast alla room dell'evento dopo commit di un nuovo commento. Solo pseudonimo, mai identita reale/Cacciatore."
+    },
+    {
+      "name": "discovery.guess_result",
+      "direction": "server->client",
+      "payload": "{photo_id, guess_id, is_correct, guess_rank|null, attempts_left, points_awarded}",
+      "when": "send_to_participant al solo guesser, dopo commit del guess. Ack privato: la correttezza non e mai broadcastata."
+    },
+    {
+      "name": "discovery.photo_solved",
+      "direction": "server->client",
+      "payload": "{photo_id, solved_at, correct_guess_count}",
+      "when": "Broadcast alla room al PRIMO guess corretto (ticker dell'alta societa). NON contiene il subject_participant_id ne il Cacciatore."
+    },
+    {
+      "name": "discovery.subject_guessed",
+      "direction": "server->client",
+      "payload": "{photo_id, correct_guess_count, latest_guess_rank}",
+      "when": "send_to_participant al Cacciatore (e, discretamente, al Soggetto) quando qualcuno indovina: notifica privata di avvenuta scoperta, per invogliare l'Invito al Dialogo."
+    },
+    {
+      "name": "discovery.subject_revealed",
+      "direction": "server->client",
+      "payload": "{photo_id, subject_participant_id, subject_pseudonym, revealed_at, message}",
+      "when": "Broadcast alla room quando il Soggetto sceglie di rivelarsi (consenso esplicito). Espone lo pseudonimo del Soggetto, mai quello del Cacciatore."
+    },
+    {
+      "name": "discovery.invite_received",
+      "direction": "server->client",
+      "payload": "{invite_id, photo_id, context, message, inviter_participant_id, inviter_pseudonym, expires_at}",
+      "when": "send_to_participant al solo invitato dopo la creazione dell'invito. L'inviter accetta di rivelarsi all'invitato (privato 1:1)."
+    },
+    {
+      "name": "discovery.invite_answered",
+      "direction": "server->client",
+      "payload": "{invite_id, photo_id, status, chat_id|null}",
+      "when": "send_to_participant all'inviter quando l'invitato risponde (accepted/declined). Su accepted include chat_id se gia disponibile."
+    },
+    {
+      "name": "discovery.invite_expired",
+      "direction": "server->client",
+      "payload": "{invite_id, photo_id}",
+      "when": "send_to_participant a inviter e invitee quando il job di scadenza porta un invito pending a 'expired'."
+    },
+    {
+      "name": "discovery.comment_added (client->server via REST, non WS)",
+      "direction": "client->server",
+      "payload": "n/a — le mutazioni (commento, guess, reveal, invite) passano SOLO via REST; il WS e read-only lato client tranne i frame di sistema auth/ping/pong",
+      "when": "Nota di contratto: coerente con la foundation (persist->publish). Nessun frame applicativo client->server in questo dominio."
+    }
+  ],
+  "rules": [
+    "MACCHINA A STATI foto-Scoperta (whisper_discovery_state): [init] --photo.published(EventBus dal dominio photo)--> hidden/unsolved (crea la riga). unsolved --primo guess corretto--> solved (set solved_at, first_correct_guesser_id) [one-shot, guardia su solved_at IS NULL]. reveal_state: hidden --POST reveal dal Soggetto--> revealed. I due assi (solved, reveal) sono indipendenti.",
+    "MACCHINA A STATI invito: pending --accept(invitee)--> accepted (emette DomainEvent InviteAccepted->dialogue apre chat); pending --decline(invitee)--> declined; pending --cancel(inviter)--> cancelled; pending --timeout(job, expires_at<now)--> expired. Da qualunque stato terminale nessuna transizione. responded_at valorizzato su ogni uscita da pending.",
+    "CORRETTEZZA GUESS: is_correct := (guessed_subject_participant_id == PhotoPort.get_subject(photo_id)). Il subject della foto e immutabile dopo la pubblicazione; discovery non memorizza il subject se non nella proiezione a rivelazione avvenuta.",
+    "FORMULA PUNTI INDOVINO (per guess corretto, una volta per foto per guesser): guesser_points(rank) = BASE_CORRECT_GUESS + max(0, FIRST_CORRECT_BONUS - (rank-1)*DECAY_STEP), con BASE_CORRECT_GUESS=10, FIRST_CORRECT_BONUS=15, DECAY_STEP=5. => rank1=25, rank2=20, rank3=15, rank>=4=10. reason=subject_guessed, idempotency_key='subject_guessed:{photo_id}:{guesser_id}'.",
+    "FORMULA PUNTI CACCIATORE (solve): al PRIMO guess corretto della sua foto, hunter_points += HUNTER_SOLVE_POINTS=20. reason=photo_solved, idempotency_key='photo_solved:{photo_id}'. One-shot garantito da idempotenza + guardia solved_at.",
+    "FORMULA PUNTI CACCIATORE (popolarita): per ogni guess corretto con guess_rank <= POP_CAP=10, hunter_points += HUNTER_PER_GUESSER=3. reason=hunter_guess_bonus, idempotency_key='hunter_guess_bonus:{photo_id}:{guesser_id}' (una volta per distinto indovino corretto). Oltre POP_CAP nessun bonus popolarita.",
+    "ANTI-ABUSO GUESS (regole cumulate, valutate prima dell'insert): (1) guessed_subject != guesser (403 self_guess_forbidden); (2) il guesser non puo essere il Soggetto ne il Cacciatore della foto -> 403; (3) candidato gia tentato per la foto -> 409 duplicate_guess (uq); (4) tentativi distinti per (photo,guesser) < MAX_GUESS_ATTEMPTS_PER_PHOTO=3, altrimenti 409 guess_limit_reached; (5) a guess corretto trovato, ulteriori guess sulla stessa foto bloccati (has_correct); (6) cooldown globale per partecipante: now() - last_guess_created_at >= GUESS_COOLDOWN_SECONDS=20, altrimenti 429 guess_cooldown.",
+    "PUNTI GUESS ERRATO: WRONG_GUESS_PENALTY=0 nel MVP (configurabile via event.settings; se >0 diventa delta negativo a ledger con idem 'wrong_guess:{guess_id}'). Il guess errato consuma comunque 1 dei 3 tentativi (deterrente principale).",
+    "PRECONDIZIONI TEMPORALI: commenti, guess, reveal, invite ammessi solo con event.status='open' e now() in [starts_at, ends_at/closed_at] e foto non rimossa (PhotoPort). Su evento chiuso: sola lettura (feed/gazzettino) -> mutazioni rispondono 410 event.closed.",
+    "ORDINE PERSIST->PUBLISH (foundation): ogni use case committa la transazione (insert guess + update discovery_state + award via PointsPort nella STESSA transazione dove possibile) e SOLO dopo il router traduce i DomainEvent in buste realtime sull'EventBus. Il realtime e best-effort; lo stato si riallinea via REST.",
+    "ELEGGIBILITA INVITO: l'inviter deve essere il Soggetto della foto (PhotoPort.get_subject). context='hunter' richiede invitee == Cacciatore (PhotoPort.get_hunter); context='guesser' richiede un guess corretto dell'invitee su quella foto; context='commenter' richiede almeno un commento visibile dell'invitee su quella foto. La rivelazione pubblica NON e prerequisito: l'invito e privato 1:1.",
+    "ACCETTAZIONE INVITO -> DIALOGUE: su accept, discovery emette DomainEvent DiscoveryInviteAccepted{event_id, invite_id, photo_id, subject_id, counterpart_id}; il dominio dialogue lo consuma via EventBus, apre la chat e lo scambio contatti, poi scrive chat_id di ritorno (porta DialoguePort o callback) che discovery salva su whisper_invite.chat_id. Discovery NON crea ne memorizza chat/contatti."
+  ],
+  "points": [
+    {
+      "action": "Indovinare correttamente il Soggetto di una Whisper",
+      "points": "BASE_CORRECT_GUESS(10) + max(0, 15 - (rank-1)*5) => 25/20/15/10 per rank 1/2/3/>=4",
+      "notes": "reason=subject_guessed; idem='subject_guessed:{photo_id}:{guesser_id}'; una sola volta per foto per indovino; accreditato via PointsPort nella stessa transazione dell'insert del guess."
+    },
+    {
+      "action": "La propria Whisper viene scoperta (primo guess corretto)",
+      "points": "+20 al Cacciatore (one-shot)",
+      "notes": "reason=photo_solved (NUOVO PointReason, estensione additiva a shared/core/enums.py); idem='photo_solved:{photo_id}'; guardia solved_at + idempotenza evitano doppio accredito."
+    },
+    {
+      "action": "Ogni distinto indovino corretto sulla propria Whisper (fino a 10)",
+      "points": "+3 al Cacciatore per indovino con guess_rank<=10",
+      "notes": "reason=hunter_guess_bonus (NUOVO PointReason additivo); idem='hunter_guess_bonus:{photo_id}:{guesser_id}'; premia la 'desiderabilita/originalita' della foto."
+    },
+    {
+      "action": "Guess errato",
+      "points": "0 (MVP); configurabile a penalita negativa via event.settings",
+      "notes": "Nessun accredito; consuma 1 dei 3 tentativi. Se penalita>0: delta negativo a ledger, idem='wrong_guess:{guess_id}'."
+    },
+    {
+      "action": "Rivelazione del Soggetto / Invito al Dialogo accettato",
+      "points": "Nessun punto diretto dal dominio discovery nel MVP",
+      "notes": "Evita doppia contabilita; alimenta i badge derivati da gamification ('Il Soggetto piu Desiderato', 'Il Cacciatore piu Astuto', 'Il Pettegolo piu Informato') che leggono ledger + aggregati discovery. Vedi open questions su eventuale reveal_bonus."
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: guess e commenti memorizzano solo participant_id (guesser, candidato, autore) e pseudonimi per-evento; nessun dato identificativo reale ne contatto. I contatti (Instagram/telefono) restano esclusivamente nel dominio dialogue dopo accettazione dell'invito.",
+    "Discrezione Cacciatore: l'identita/participant_id del Cacciatore non compare MAI nei payload broadcast (comment_added, photo_solved, subject_revealed) ne verso altri partecipanti; e nota solo a PhotoPort/host per moderazione. discovery.subject_guessed e privata al Cacciatore.",
+    "Discrezione guess: correttezza e coppia chi-indovina->chi e privata al guesser (guess_result via send_to_participant). Al pubblico solo aggregati (correct_guess_count/total_guess_count). Il subject_participant_id e esposto solo dopo reveal volontario del Soggetto.",
+    "Consenso reveal: subject_participant_id/pseudonimo del Soggetto disclosi solo su azione esplicita del Soggetto (POST /reveal) o, in privato, verso l'invitato quando il Soggetto emette l'invito. Nessuna deanonimizzazione automatica al solve.",
+    "Scoping e retention: tutte le tabelle hanno event_id FK ON DELETE CASCADE -> il job di retention (DELETE event) hard-delete propaga a commenti/guess/discovery_state/invite. Nessun artefatto S3 di proprieta discovery (le foto sono del dominio photo).",
+    "Diritto alla cancellazione (erase_participant handler discovery): DELETE whisper_comment e whisper_guess dove il participant e autore/guesser; DELETE whisper_guess dove il participant e il candidato indovinato; whisper_invite dove e inviter o invitee -> cancellati; whisper_discovery_state.first_correct_guesser_id -> SET NULL (mantiene l'aggregato per gazzettini gia emessi senza linkage). I contatori restano anonimi.",
+    "Audit: consent/reveal/accettazioni tracciati via created_at/responded_at/revealed_at (timestamp + participant_id, mai dati personali). I log applicativi non contengono contatti reali ne token.",
+    "Revoca fotografabilita/erase del Soggetto: se il Soggetto revoca is_photographable o viene cancellato, la foto e rimossa dal dominio photo e il CASCADE su photo_id ripulisce discovery_state/guess/comment/invite collegati; i guess in corso su quella foto rispondono 404 photo_not_available."
+  ],
+  "open_questions": [
+    "Confine discovery/dialogue: l'artefatto whisper_invite vive in discovery (deciso qui) mentre la chat vive in dialogue via DomainEvent InviteAccepted. Confermare con l'owner di dialogue la porta di ritorno per chat_id e chi possiede il concetto di 'invito' se dialogue avesse gia un suo modello di richiesta chat.",
+    "Bidirezionalita invito: nel MVP inizia solo il Soggetto. Va ammesso che il Cacciatore o un buon indovino RICHIEDANO il dialogo al Soggetto (con accettazione del Soggetto)? Impatta lo schema (inviter potrebbe non essere il subject) e la discrezione.",
+    "Il Soggetto puo vedere QUALI partecipanti lo hanno indovinato correttamente, per scegliere chi invitare (context='guesser')? Serve un endpoint 'chi mi ha scoperto' che espone participant_id degli indovini al Soggetto: tradeoff privacy indovini vs meccanica di corteggiamento.",
+    "Penalita per guess errato: mantenere 0 o introdurre delta negativo per rafforzare l'anti-brute-force? Valori MAX_GUESS_ATTEMPTS=3, COOLDOWN=20s, POP_CAP=10 da validare con playtest e rendere override in event.settings.",
+    "Nuovi PointReason (photo_solved, hunter_guess_bonus) da aggiungere additivamente a shared/core/enums.py: confermare naming con l'owner di gamification (in alternativa un unico reason 'whisper_discovered' con metadata che distingue solve vs popolarita).",
+    "photo.subject_participant_id: confermare con il dominio photo che il Soggetto e sempre un unico partecipante opt-in noto e immutabile dopo publish, e l'esistenza della PhotoPort (get_subject, get_hunter, is_available). Gestione del caso 'Whisper senza soggetto designato' se ammesso.",
+    "reveal_bonus: assegnare piccoli punti al Soggetto che si rivela / accetta un dialogo per incentivare l'apertura, o lasciarlo solo ai badge? Rischio farming di reveal/inviti.",
+    "Commenti: nel MVP flat, senza reply/mention. Serve threading o reazioni ('like') che potrebbero alimentare punti/badge del 'Pettegolo piu Informato'? Definire metrica di 'buon commentatore' per context='commenter'.",
+    "Inizializzazione discovery_state: creazione lazy al primo guess/commento vs eager su sottoscrizione a photo.published via EventBus. Preferenza eager per contatori coerenti; confermare che photo pubblichi l'evento."
+  ]
+}

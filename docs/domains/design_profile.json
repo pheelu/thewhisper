@@ -1,0 +1,484 @@
+{
+  "domain": "profile",
+  "summary": "Il dominio profile possiede la \"persona nobiliare\" di ogni Participant: titolo nobiliare (tassonomia), segreto/mistero, indizi (clues) e la loro rivelazione progressiva, oltre alla gestione dello pseudonimo e all'audit del consenso opt-in alla fotografabilita. Estende la tabella foundation participant con una tabella 1:1 (participant_profile) e modella la \"scoperta\" come una macchina a stati (concealed -> hinted -> unmasked) alimentata da segnali di attenzione idempotenti provenienti dagli altri domini via porta interna. Non duplica pseudonym/noble_title/is_photographable (canonici su participant): li muta tramite use case/porte del dominio identity e ne tiene lo stato di gioco.",
+  "tables": [
+    {
+      "name": "participant_profile",
+      "purpose": "Estensione 1:1 di participant con la persona nobiliare: segreto/mistero, motto, casata, avatar generato (mai foto reale), indizi (clues) e stato di rivelazione progressiva. E la radice dei dati posseduti dal dominio profile.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (UUIDv7 applicativo)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE (scoping/purge GDPR per-evento)"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, UNIQUE, FK->participant.id ON DELETE CASCADE (relazione 1:1)"
+        },
+        {
+          "name": "secret_template_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->profile_secret_template.id ON DELETE SET NULL (archetipo mistero scelto)"
+        },
+        {
+          "name": "secret_text",
+          "type": "text",
+          "constraints": "NULL. Mistero personalizzato (es. 'Scrittore di poesie segrete'). Free text -> minimizzazione GDPR, purgato a retention"
+        },
+        {
+          "name": "motto",
+          "type": "text",
+          "constraints": "NULL. Motto nobiliare"
+        },
+        {
+          "name": "house_name",
+          "type": "text",
+          "constraints": "NULL. Nome della casata"
+        },
+        {
+          "name": "avatar_seed",
+          "type": "text",
+          "constraints": "NOT NULL. Seed deterministico (default = hash di participant_id) per avatar/silhouette generata; nessuna foto reale qui"
+        },
+        {
+          "name": "accent_color",
+          "type": "text",
+          "constraints": "NULL, CHECK (accent_color ~ '^#[0-9a-fA-F]{6}$')"
+        },
+        {
+          "name": "bio",
+          "type": "text",
+          "constraints": "NULL. Breve descrizione della persona (non identificante)"
+        },
+        {
+          "name": "clues",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '[]'. Array ordinato di indizi scopribili: [{id:uuid, type:profile_detail_type, label:text, reveal_order:int, sensitive:bool}]"
+        },
+        {
+          "name": "reveal_stage",
+          "type": "enum(profile_reveal_stage: concealed|hinted|unmasked)",
+          "constraints": "NOT NULL DEFAULT 'concealed'. Proiezione della macchina a stati (vedi rules)"
+        },
+        {
+          "name": "reveal_score",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0, CHECK (reveal_score >= 0). Proiezione = somma pesi in profile_reveal_signal"
+        },
+        {
+          "name": "is_complete",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false. True quando la persona e completa (vedi formula completezza)"
+        },
+        {
+          "name": "completed_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Momento del primo raggiungimento della completezza (trigger bonus punti)"
+        },
+        {
+          "name": "disclosed_publicly_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Auto-svelamento pubblico dell'identita da parte del Soggetto -> stato unmasked"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (TimestampMixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate now() (TimestampMixin)"
+        }
+      ],
+      "indexes": [
+        "uq_participant_profile_participant_id UNIQUE(participant_id)",
+        "ix_participant_profile_event_id (event_id)",
+        "ix_participant_profile_reveal_stage (event_id, reveal_stage)"
+      ]
+    },
+    {
+      "name": "profile_reveal",
+      "purpose": "Ledger per-osservatore delle scoperte: registra quale viewer ha sbloccato un indizio specifico o l'identita di un subject. Idempotente. Non espone mai il viewer ad altri (discrezione).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "subject_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE (chi viene scoperto)"
+        },
+        {
+          "name": "viewer_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE (chi scopre)"
+        },
+        {
+          "name": "clue_id",
+          "type": "uuid",
+          "constraints": "NULL. Riferisce clues[].id dentro participant_profile; NULL = rivelazione identita completa"
+        },
+        {
+          "name": "reveal_kind",
+          "type": "enum(profile_reveal_kind: detail_unlocked|identity_disclosed)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "source",
+          "type": "enum(profile_reveal_source: correct_guess|dialogue_invite|attention_threshold|self_disclosure|host)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        }
+      ],
+      "indexes": [
+        "uq_profile_reveal_viewer_subject_clue UNIQUE(event_id, viewer_participant_id, subject_participant_id, clue_id) NULLS NOT DISTINCT (idempotenza sblocco; PG>=15)",
+        "ix_profile_reveal_viewer (event_id, viewer_participant_id)",
+        "ix_profile_reveal_subject (event_id, subject_participant_id)"
+      ]
+    },
+    {
+      "name": "profile_reveal_signal",
+      "purpose": "Registro append-only e idempotente dei segnali di attenzione su un subject (foto pubblicata, commento, guess corretto, missiva ricevuta). E l'analogo del point_ledger per la reveal: reveal_score deriva da qui, garantendo assenza di doppi conteggi su retry/redelivery.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "subject_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "signal_kind",
+          "type": "text",
+          "constraints": "NOT NULL. Es. 'whisper_published','comment_added','correct_guess','missive_received'"
+        },
+        {
+          "name": "weight",
+          "type": "integer",
+          "constraints": "NOT NULL, CHECK (weight > 0). Peso del segnale (vedi formula)"
+        },
+        {
+          "name": "source_domain",
+          "type": "text",
+          "constraints": "NOT NULL. Dominio emittente (photo/discovery/dialogue) per audit"
+        },
+        {
+          "name": "source_ref",
+          "type": "text",
+          "constraints": "NOT NULL. Id dell'entita di business (photo_id, guess_id, missive_id)"
+        },
+        {
+          "name": "idempotency_key",
+          "type": "text",
+          "constraints": "NOT NULL. Deterministica sull'evento di business (es. 'correct_guess:{photo_id}:{guesser_id}')"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        }
+      ],
+      "indexes": [
+        "uq_profile_reveal_signal_event_idem UNIQUE(event_id, idempotency_key)",
+        "ix_profile_reveal_signal_subject (event_id, subject_participant_id)"
+      ]
+    },
+    {
+      "name": "profile_consent_event",
+      "purpose": "Log append-only delle variazioni del consenso opt-in alla fotografabilita, per dimostrabilita GDPR (foundation 6.6). Il flag autoritativo resta su participant.is_photographable/consent_at.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE (interessato)"
+        },
+        {
+          "name": "previous_value",
+          "type": "boolean",
+          "constraints": "NULL (NULL al primo evento)"
+        },
+        {
+          "name": "new_value",
+          "type": "boolean",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "actor_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE (self o host)"
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "constraints": "NOT NULL. 'self' | 'host' | 'erase'"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        }
+      ],
+      "indexes": [
+        "ix_profile_consent_event_participant (event_id, participant_id, created_at DESC)"
+      ]
+    },
+    {
+      "name": "profile_secret_template",
+      "purpose": "Catalogo di riferimento (globale, non per-evento) degli archetipi di mistero selezionabili al join/edit profilo (es. 'Scrittore di poesie segrete'). Dati statici/curati, nessun dato personale -> eccezione consapevole allo scoping per event_id.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "code",
+          "type": "text",
+          "constraints": "NOT NULL, UNIQUE. Slug stabile machine-readable"
+        },
+        {
+          "name": "label",
+          "type": "text",
+          "constraints": "NOT NULL. Testo mostrato (localizzabile lato FE)"
+        },
+        {
+          "name": "category",
+          "type": "text",
+          "constraints": "NULL. Es. 'romantico','misterioso','avventuroso'"
+        },
+        {
+          "name": "default_clues",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '[]'. Indizi suggeriti da precompilare in participant_profile.clues"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate now()"
+        }
+      ],
+      "indexes": [
+        "uq_profile_secret_template_code UNIQUE(code)",
+        "ix_profile_secret_template_is_active (is_active)"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/profiles/me",
+      "purpose": "Vista completa del proprio profilo (include secret_text e tutti i clues, reveal_score/stage, chi ti ha scoperto in aggregato).",
+      "auth": "participant",
+      "request": "Nessun body. event_id/participant_id dal token.",
+      "response": "200 {id, participant_id, pseudonym, noble_title, secret_template_id, secret_text, motto, house_name, avatar_seed, accent_color, bio, clues:[{id,type,label,reveal_order,sensitive}], reveal_stage, reveal_score, visible_clue_count, is_complete, is_photographable, consent_at}"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/profiles/me",
+      "purpose": "Crea/aggiorna la persona nobiliare (upsert 1:1). Ricalcola completezza, eventualmente accredita bonus profile_completed, emette profile.updated.",
+      "auth": "participant",
+      "request": "{secret_template_id?, secret_text?, motto?, house_name?, avatar_seed?, accent_color?, bio?, clues?:[{type,label,reveal_order,sensitive}]}. clue.id assegnato server-side (UUIDv7).",
+      "response": "200 profilo completo (come GET /profiles/me). Errori: 422 payload, 400 accent_color/clue non validi"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/profiles/me/pseudonym",
+      "purpose": "Rinomina lo pseudonimo (unicita per-evento). Delega la scrittura al dominio identity via porta; emette profile.updated.",
+      "auth": "participant",
+      "request": "{pseudonym: string}",
+      "response": "200 {participant_id, pseudonym}. Errori: 409 profile.pseudonym_taken, 403 profile.rename_locked (gia Soggetto di una foto pubblicata), 429 rate limit (max 3/evento)"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/profiles/me/title",
+      "purpose": "Imposta/cambia il titolo nobiliare (tassonomia ParticipantNobleTitle). Delega a identity; emette profile.updated.",
+      "auth": "participant",
+      "request": "{noble_title: enum ParticipantNobleTitle}",
+      "response": "200 {participant_id, noble_title}. Errori: 422 titolo non nella tassonomia"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/me/consent",
+      "purpose": "Imposta/revoca il consenso opt-in alla fotografabilita (endpoint canonico foundation, posseduto da profile). Scrive il flag su participant via ConsentPort(identity), registra profile_consent_event, notifica photo (blocco nuove foto se revoca) via porta.",
+      "auth": "participant",
+      "request": "{is_photographable: boolean}",
+      "response": "200 {participant_id, is_photographable, consent_at}. WS profile.consent_changed (mirato). Nota: host puo solo forzare a false (moderazione), mai a true per conto di un guest"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/profiles/{participant_id}",
+      "purpose": "Vista di un altro profilo filtrata dallo stato di rivelazione RELATIVO al viewer: solo campi pubblici + clues sbloccati globalmente + clues sbloccati specificamente per me + eventuale identita se mi e stata svelata.",
+      "auth": "participant",
+      "request": "Path participant_id (deve appartenere allo stesso evento del token).",
+      "response": "200 {participant_id, pseudonym, noble_title, avatar_seed, accent_color, reveal_stage, visible_clues:[{id,type,label}], identity_disclosed_to_me:bool, is_photographable}. Mai secret_text ne clues non sbloccati ne viewer terzi. Errori: 404 fuori scope evento"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/profiles",
+      "purpose": "Roster paginato delle persone dell'evento (silhouette pubbliche) per esplorare il salotto.",
+      "auth": "participant",
+      "request": "Query: ?limit=1..100(default 20)&cursor=<opaque>. Ordine created_at DESC,id DESC.",
+      "response": "200 {items:[{participant_id, pseudonym, noble_title, avatar_seed, accent_color, reveal_stage}], page:{next_cursor,limit}}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/profiles/me/disclose",
+      "purpose": "Auto-svelamento dell'identita da parte del Soggetto: mirato a un viewer (apre la strada all'Invito al Dialogo) o pubblico (unmask nel salotto). Crea profile_reveal identity_disclosed; se pubblico setta disclosed_publicly_at e stage=unmasked.",
+      "auth": "participant",
+      "request": "{scope: 'targeted'|'public', to_participant_id?: uuid (obbligatorio se targeted)}",
+      "response": "200 {reveal_id, scope, subject_participant_id, to_participant_id?}. WS profile.identity_disclosed (mirato o broadcast). Nota: nessun contatto reale qui (Instagram/telefono sono solo nel dominio dialogue)"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/profiles/me/reveals",
+      "purpose": "Riepilogo di chi/quanto ha scoperto di me (come Soggetto): conteggi per clue e rivelazioni identita concesse. Rispetta la discrezione: mostra il viewer solo se il viewer stesso si e auto-svelato.",
+      "auth": "participant",
+      "request": "Nessun body.",
+      "response": "200 {reveal_score, reveal_stage, per_clue:[{clue_id, unlocked_count}], identity_disclosed_to:[{to_participant_id?}], most_desired_rank?}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/profiles/secret-templates",
+      "purpose": "Elenco archetipi di mistero attivi da scegliere nel wizard di creazione persona.",
+      "auth": "participant",
+      "request": "Query opzionale ?category=",
+      "response": "200 {items:[{id, code, label, category, default_clues}]}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/profiles/titles",
+      "purpose": "Tassonomia dei titoli nobiliari con metadata (rango, genere, coppia maschile/femminile) per il picker. Dati statici serviti dal core del dominio.",
+      "auth": "participant",
+      "request": "Nessun body.",
+      "response": "200 {items:[{value:enum, label, rank:int, gender:'m'|'f', pair_value:enum}]}"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "profile.updated",
+      "direction": "server->client",
+      "payload": "{participant_id, pseudonym?, noble_title?, motto?, house_name?, avatar_seed?, accent_color?}. Solo campi pubblici non identificanti.",
+      "when": "Dopo PUT /profiles/me, PATCH pseudonym o title. Broadcast nella room dell'evento per aggiornare il salotto/feed."
+    },
+    {
+      "name": "profile.clue_revealed",
+      "direction": "server->client",
+      "payload": "{subject_participant_id, clue_id, clue_type, clue_label, reveal_order, reveal_stage}",
+      "when": "Quando reveal_score supera una nuova soglia di clue (floor(reveal_score/CLUE_COST) cresce) rendendo globalmente scopribile un indizio. Broadcast (mai identita reale)."
+    },
+    {
+      "name": "profile.reveal_advanced",
+      "direction": "server->client",
+      "payload": "{subject_participant_id, reveal_stage, reveal_score, visible_clue_count}",
+      "when": "Transizione di stato del subject (concealed->hinted, o ->unmasked). Broadcast."
+    },
+    {
+      "name": "profile.identity_disclosed",
+      "direction": "server->client",
+      "payload": "{subject_participant_id, scope:'targeted'|'public', to_participant_id?}. Nessun contatto reale.",
+      "when": "Dopo POST /profiles/me/disclose. Se targeted: send_to_participant al destinatario; se public: broadcast."
+    },
+    {
+      "name": "profile.consent_changed",
+      "direction": "server->client",
+      "payload": "{participant_id, is_photographable}",
+      "when": "Dopo POST /me/consent. Recapito MIRATO al solo interessato (e all'host per moderazione), mai broadcast (privacy). Il dominio photo viene informato via porta interna, non via WS."
+    }
+  ],
+  "rules": [
+    "FORMULA reveal_score: reveal_score(subject) = SUM(profile_reveal_signal.weight) per subject nell'evento. Pesi per signal_kind: whisper_published=1, comment_added=1, missive_received=1, correct_guess=3. La colonna participant_profile.reveal_score e una proiezione mantenuta nella stessa transazione dell'insert del segnale; ricalcolabile con SUM(weight).",
+    "IDEMPOTENZA segnali: register_signal(event_id, subject_id, signal_kind, source_domain, source_ref, idempotency_key) inserisce in profile_reveal_signal con UNIQUE(event_id, idempotency_key). Chiave deterministica sull'evento di business (es. 'correct_guess:{photo_id}:{guesser_id}'). Secondo insert in conflitto = no-op: nessun doppio incremento su retry/redelivery WS.",
+    "MACCHINA A STATI reveal_stage: concealed (reveal_score < HINT_THRESHOLD=3 e disclosed_publicly_at IS NULL) -> hinted (reveal_score >= 3 e non svelato pubblicamente) -> unmasked (disclosed_publicly_at IS NOT NULL). Transizione concealed->hinted automatica alla soglia. Transizione ->unmasked SOLO via auto-svelamento pubblico del Soggetto: nessun unmask automatico (discrezione/GDPR). Lo stato e monotono: mai regressione (hinted->concealed vietato).",
+    "FORMULA clues globalmente visibili: visible_count = min(len(clues), floor(reveal_score / CLUE_COST)), CLUE_COST=3. I clues si mostrano ordinati per reveal_order ASC. I clues con sensitive=true NON entrano nel conteggio globale: richiedono identity_disclosed verso il viewer specifico. Costanti (HINT_THRESHOLD, CLUE_COST, pesi) leggibili da event.settings per override per-evento.",
+    "BONUS per-viewer da guess corretto: quando il dominio discovery registra un correct_guess del viewer V sul subject S, oltre a register_signal(weight=3) si inserisce profile_reveal(reveal_kind=detail_unlocked, source=correct_guess) che sblocca a V il PROSSIMO clue per reveal_order oltre la soglia globale. Idempotente via uq_profile_reveal_viewer_subject_clue.",
+    "AUTO-SVELAMENTO identita: solo il Soggetto puo svelarsi. scope=targeted -> profile_reveal(identity_disclosed, viewer=to_participant_id, source=self_disclosure), prerequisito per l'Invito al Dialogo (dominio dialogue apre la chat). scope=public -> disclosed_publicly_at=now(), reveal_stage=unmasked, tutti collegano pseudonimo<->identita di gioco (mai contatti reali, che restano nel dominio dialogue dietro consenso bidirezionale).",
+    "FORMULA completezza profilo: is_complete = (secret_template_id IS NOT NULL OR secret_text presente) AND motto presente AND avatar_seed presente AND len(clues) >= 3. Al PRIMO passaggio a true: completed_at=now() e accredito bonus profile_completed via PointsPort con idempotency_key='profile_completed:{participant_id}' (un solo accredito).",
+    "CONSENSO opt-in: il flag autoritativo e participant.is_photographable (+consent_at) posseduto da identity; profile lo muta via ConsentPort e registra ogni cambio in profile_consent_event. Opt-in impostabile solo dal diretto interessato (self). L'host puo forzare solo a false (rimozione tutela); revoca -> profile notifica photo che blocca nuove pubblicazioni sul subject.",
+    "RENAME pseudonimo: unicita per-evento su (event_id, lower(pseudonym)) delegata a identity. Consentito finche il participant non e Soggetto di alcuna foto pubblicata (integrita del gioco di indovinello) e con rate limit (max 3 cambi/evento). In violazione: 409 profile.pseudonym_taken o 403 profile.rename_locked.",
+    "TITOLO nobiliare: scelta libera dalla tassonomia (ParticipantNobleTitle di shared), NON univoco (piu Duchi ammessi), modificabile in qualsiasi momento mentre event.status='open'. Metadata di rango/genere serviti staticamente dal core (nessuna tabella).",
+    "SCOPING e discrezione: ogni query filtra event_id dal token (mai dal client). GET /profiles/{id} filtra i campi in base al reveal RELATIVO al viewer; secret_text e clues non sbloccati non lasciano mai il server; profile_reveal non espone mai l'identita di viewer terzi. Le buste WS broadcast usano solo participant_id/pseudonimi.",
+    "COLLABORAZIONE cross-dominio: profile espone ProfileRevealPort.register_signal(...) (chiamata da photo/discovery/dialogue dopo il loro commit) e consuma ConsentPort(identity) e PointsPort(gamification). Ordine: commit DB del dominio emittente -> chiamata porta profile -> (dopo commit profile) pubblicazione EventBus. Il core resta puro: i use case restituiscono DomainEvent tradotti in buste dall'adapter router."
+  ],
+  "points": [
+    {
+      "action": "Completamento profilo (profile_completed)",
+      "points": "+5",
+      "notes": "Accreditato una sola volta al primo raggiungimento di is_complete (secret + motto + avatar + >=3 clues). Via PointsPort con idempotency_key='profile_completed:{participant_id}'. Richiede PR additiva a PointReason in shared/core/enums.py per il valore 'profile_completed'. Incentiva una persona ricca da scoprire senza premiare la deanonimizzazione."
+    },
+    {
+      "action": "Auto-svelamento identita (disclose)",
+      "points": "0 (nessun punto)",
+      "notes": "Scelta deliberata: non si premia lo svelarsi, per non coartare il consenso ne la privacy. La desiderabilita ('Il Soggetto piu Desiderato') e un badge derivato dai reveal, assegnato dal dominio gamification, non un accredito diretto di profile."
+    },
+    {
+      "action": "Guess corretto / attenzione ricevuta",
+      "points": "delegato",
+      "notes": "I punti per indovinare il Soggetto e per l'attivita foto NON sono emessi da profile: appartengono a discovery/photo. Profile riceve solo il segnale (register_signal) che alimenta reveal_score, senza toccare il point_ledger."
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: nessun dato identificativo reale nel dominio. Identita = solo pseudonimo per-evento; avatar_seed genera una silhouette deterministica, mai una foto reale (le foto vivono nel dominio photo su S3).",
+    "secret_text/motto/bio/clues sono free text autoriale: rischio di dati personali immessi dall'utente. Trattati come dati di gioco event-scoped, purgati alla retention dell'evento; l'UI del wizard suggerisce archetipi (profile_secret_template) per ridurre l'immissione libera.",
+    "Consenso opt-in tracciato con dimostrabilita: ogni transizione in profile_consent_event (previous/new, actor, source, timestamp); il flag canonico e consent_at su participant. Revoca sempre disponibile via POST /me/consent, propagata a photo per bloccare nuove pubblicazioni.",
+    "Retention per-evento: tutte le tabelle profile hanno event_id con FK ON DELETE CASCADE; il DELETE FROM event del job di retention le elimina in hard-delete senza artefatti esterni (profile non scrive su S3). profile_secret_template e riferimento globale non personale (nessun event_id) e non e soggetto a purge.",
+    "Diritto alla cancellazione: profile implementa ErasablePort.erase_participant(event_id, participant_id) che (a) cancella participant_profile e i profile_reveal dove il participant e subject o viewer, (b) anonimizza/rimuove profile_reveal_signal riferiti al subject, (c) conserva profile_consent_event solo se necessario alla dimostrabilita, altrimenti lo cancella. Nessun aggregato residuo deanonimizzante.",
+    "Discrezione: GET /profiles/{id} e le buste WS non rivelano mai viewer terzi ne clues/secret non sbloccati; l'identita del Cacciatore non transita mai da questo dominio (profile non conosce il legame Cacciatore<->foto). consent_changed e recapitato solo al diretto interessato e all'host, mai broadcast.",
+    "Audit minimo senza sovra-raccolta: si registrano solo timestamp+attore per consensi, completamenti e svelamenti; i log applicativi non contengono secret_text ne token."
+  ],
+  "open_questions": [
+    "Ownership del flag/endpoint di consenso: la foundation colloca is_photographable/consent_at su participant (identity) e dichiara POST /api/v1/me/consent tra gli endpoint foundation. Confermare che profile possa possedere l'HANDLER (audit + notifica photo) mutando il flag via ConsentPort di identity, o se l'endpoint debba restare in identity con profile che ne osserva solo gli effetti.",
+    "Confine profile vs discovery/dialogue sullo svelamento identita: chi possiede l'azione 'Invito al Dialogo'? Proposta: profile possiede lo STATO di reveal (profile_reveal identity_disclosed), dialogue possiede l'apertura della chat e lo scambio contatti. Confermare che POST /profiles/me/disclose viva qui e che dialogue lo consumi.",
+    "Propagazione dei segnali di reveal: push esplicito via ProfileRevealPort.register_signal chiamato da photo/discovery/dialogue, oppure sottoscrizione di profile all'EventBus sugli eventi photo.published/discovery.subject_guessed/dialogue.missive_received? La foundation suggerisce collaborazione via porte/use case; confermare per evitare accoppiamento sul bus realtime.",
+    "Un correct_guess deve svelare al guesser l'identita completa o solo un clue extra? Proposta attuale: solo clue extra (identita resta scelta del Soggetto). Da validare col dominio discovery per l'esperienza di gioco.",
+    "Costanti di reveal (HINT_THRESHOLD=3, CLUE_COST=3, pesi segnali): fisse o configurabili per-evento via event.settings? Servono valori bilanciati dal game design in base alla durata tipica dell'aperitivo.",
+    "profile_secret_template globale vs per-evento: catalogo statico condiviso (proposta) oppure personalizzabile dall'host per tema serata? Se personalizzabile, aggiungere event_id nullable o una tabella di override.",
+    "Rename pseudonimo: politica definitiva. Proposta: bloccato dopo essere diventati Soggetto di una foto + max 3/evento. Confermare con photo/discovery per non rompere l'integrita degli indovinelli in corso.",
+    "Valore del bonus profile_completed (+5) e sua necessita: rischio di gaming (profili riempiti a caso). Valutare gating qualitativo o spostare l'incentivo interamente sui badge di gamification."
+  ]
+}

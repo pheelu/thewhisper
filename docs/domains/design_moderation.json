@@ -1,0 +1,493 @@
+{
+  "domain": "moderation",
+  "summary": "Il dominio moderation garantisce sicurezza, consenso e conformita GDPR del gioco: raccoglie segnalazioni su qualunque contenuto (foto, commenti, missive, chat, profili), nasconde automaticamente i contenuti sopra-soglia, permette al Soggetto la rimozione rapida di una foto che lo ritrae e il cascade sulla revoca del consenso, offre all'host strumenti di revisione/sanzione (warning/mute/ban) e ai partecipanti il blocco personale. Non possiede foto/commenti/chat (li governa via port dei domini proprietari) ne il ledger punti (usa PointsPort per le sole penalita), e preserva sempre la discrezione sull'identita del Cacciatore.",
+  "tables": [
+    {
+      "name": "content_report",
+      "purpose": "Segnalazione di un contenuto inappropriato fatta da un partecipante. Riferimento polimorfo al contenuto (cross-dominio) senza FK, validato via port del dominio proprietario. Una segnalazione per contenuto per segnalatore (dedup).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "reporter_participant_id",
+          "type": "uuid",
+          "constraints": "NULL (NOT NULL alla creazione; posto a NULL su erase GDPR), FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "content_type",
+          "type": "enum report_content_type(photo|whisper_comment|missive|chat_message|participant_profile)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "content_id",
+          "type": "uuid",
+          "constraints": "NOT NULL. Riferimento logico al contenuto nel dominio proprietario; nessuna FK perche cross-dominio, integrita garantita via port"
+        },
+        {
+          "name": "content_owner_participant_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->participant.id ON DELETE CASCADE. Autore/Cacciatore del contenuto (denormalizzato per penalita e review). Visibile SOLO all'host, mai in broadcast (discrezione)"
+        },
+        {
+          "name": "reason",
+          "type": "enum report_reason(inappropriate_photo|harassment|non_consensual_subject|nudity_explicit|hate_speech|spam|impersonation|other)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "note",
+          "type": "text",
+          "constraints": "NULL, CHECK (char_length(note) <= 500)"
+        },
+        {
+          "name": "content_snapshot",
+          "type": "jsonb",
+          "constraints": "NULL. Snapshot minimale del contenuto segnalato (es. titolo foto, testo commento/missiva troncato) catturato all'atto della segnalazione, per consentire la review host anche se il contenuto viene poi rimosso/editato. Purgato col retention dell'evento"
+        },
+        {
+          "name": "status",
+          "type": "enum report_status(pending|under_review|upheld|dismissed)",
+          "constraints": "NOT NULL DEFAULT 'pending'"
+        },
+        {
+          "name": "resolved_by_participant_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->participant.id (host che risolve)"
+        },
+        {
+          "name": "resolution_note",
+          "type": "text",
+          "constraints": "NULL, CHECK (char_length <= 500)"
+        },
+        {
+          "name": "resolved_at",
+          "type": "timestamptz",
+          "constraints": "NULL"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate now()"
+        }
+      ],
+      "indexes": [
+        "uq_content_report_content_reporter UNIQUE (event_id, content_type, content_id, reporter_participant_id) -- 1 report per contenuto per segnalatore",
+        "ix_content_report_event_status (event_id, status) -- coda moderazione host",
+        "ix_content_report_content (event_id, content_type, content_id) -- conteggio segnalatori distinti per contenuto",
+        "ix_content_report_owner (content_owner_participant_id) -- penalita per offender"
+      ]
+    },
+    {
+      "name": "moderation_action",
+      "purpose": "Log append-only di ogni azione/decisione di moderazione (auto-hide di sistema, rimozione/ripristino host, sanzioni, cascade consenso). Fonte di audit GDPR e base per il gazzettino aggregato. Non duplica lo stato del contenuto (che vive nel dominio proprietario).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "actor_type",
+          "type": "enum mod_actor_type(host|system|self_subject)",
+          "constraints": "NOT NULL. system=auto-hide soglia; self_subject=rimozione rapida/consenso"
+        },
+        {
+          "name": "actor_participant_id",
+          "type": "uuid",
+          "constraints": "NULL (NULL per system; host o subject altrimenti), FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "action",
+          "type": "enum moderation_action_type(content_hidden|content_removed|content_restored|report_dismissed|participant_warned|participant_muted|participant_banned|participant_unbanned|consent_cascade_removal|penalty_applied)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "content_type",
+          "type": "enum report_content_type",
+          "constraints": "NULL"
+        },
+        {
+          "name": "content_id",
+          "type": "uuid",
+          "constraints": "NULL"
+        },
+        {
+          "name": "target_participant_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->participant.id ON DELETE CASCADE (offender sanzionato/penalizzato)"
+        },
+        {
+          "name": "report_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->content_report.id ON DELETE SET NULL"
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "constraints": "NULL, CHECK (char_length <= 500)"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}' (es. {distinct_reporters, penalty_delta, idempotency_key})"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (append-only)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        }
+      ],
+      "indexes": [
+        "ix_moderation_action_event_created (event_id, created_at DESC) -- audit/gazzettino",
+        "ix_moderation_action_content (event_id, content_type, content_id)",
+        "ix_moderation_action_target (target_participant_id)"
+      ]
+    },
+    {
+      "name": "participant_sanction",
+      "purpose": "Sanzione applicata dall'host a un partecipante: warning (informativa), mute (puo leggere ma non produrre contenuti/azioni), ban (escluso dal gioco). Enforcement via SanctionPort nei domini attivi e/o revoca sessione via identity.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE (sanzionato)"
+        },
+        {
+          "name": "sanction_type",
+          "type": "enum sanction_type(warning|mute|ban)",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "constraints": "NULL, CHECK (char_length <= 500)"
+        },
+        {
+          "name": "issued_by_participant_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->participant.id (host)"
+        },
+        {
+          "name": "report_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->content_report.id ON DELETE SET NULL"
+        },
+        {
+          "name": "starts_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "expires_at",
+          "type": "timestamptz",
+          "constraints": "NULL (NULL = per tutta la durata dell'evento)"
+        },
+        {
+          "name": "lifted_at",
+          "type": "timestamptz",
+          "constraints": "NULL (revoca manuale host)"
+        },
+        {
+          "name": "lifted_by_participant_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->participant.id"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate now()"
+        }
+      ],
+      "indexes": [
+        "uq_participant_sanction_active_ban UNIQUE (event_id, participant_id) WHERE sanction_type='ban' AND lifted_at IS NULL -- un solo ban attivo",
+        "ix_participant_sanction_participant (event_id, participant_id) -- lookup enforcement"
+      ]
+    },
+    {
+      "name": "participant_block",
+      "purpose": "Blocco personale: un partecipante blocca un altro per non riceverne missive/chat e non vederne i contenuti nel feed. Feature di sicurezza additiva; i domini dialogue/photo/discovery consultano BlockPort per filtrare.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "blocker_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "blocked_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now()"
+        }
+      ],
+      "indexes": [
+        "uq_participant_block_pair UNIQUE (event_id, blocker_participant_id, blocked_participant_id)",
+        "ck_participant_block_not_self CHECK (blocker_participant_id <> blocked_participant_id)",
+        "ix_participant_block_blocker (event_id, blocker_participant_id)",
+        "ix_participant_block_blocked (event_id, blocked_participant_id)"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/v1/reports",
+      "purpose": "Un partecipante segnala un contenuto inappropriato. Innesca eventuale auto-hide e notifica host.",
+      "auth": "participant",
+      "request": "{content_type: photo|whisper_comment|missive|chat_message|participant_profile, content_id: uuid, reason: report_reason, note?: string<=500}. content_id validato via port del dominio proprietario e scoping event_id dal token.",
+      "response": "201 {report: {id, content_type, content_id, reason, status:'pending', created_at}}. 409 moderation.report_duplicate se gia segnalato dallo stesso partecipante. 404 se contenuto fuori scope evento. 429 moderation.report_rate_limited."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/reports",
+      "purpose": "Coda di moderazione per l'host (lista segnalazioni con filtri).",
+      "auth": "host",
+      "request": "query: status?=pending|under_review|upheld|dismissed, content_type?, limit(1..100 def20), cursor. Ordine created_at DESC,id DESC.",
+      "response": "200 {items:[{id, content_type, content_id, content_owner_participant_id, reason, note, status, distinct_reporters, content_snapshot, created_at}], page:{next_cursor,limit}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/reports/{report_id}",
+      "purpose": "Dettaglio segnalazione con snapshot e conteggio segnalatori per la review host.",
+      "auth": "host",
+      "request": "path report_id",
+      "response": "200 {report:{...campi..., sibling_reports_count, content_owner_participant_id, content_currently_hidden:bool}}. 404 se non nell'evento."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/reports/{report_id}/claim",
+      "purpose": "L'host prende in carico la segnalazione (pending->under_review).",
+      "auth": "host",
+      "request": "path report_id",
+      "response": "200 {report:{id,status:'under_review',resolved_by_participant_id}}. 409 moderation.report_not_pending."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/reports/{report_id}/resolve",
+      "purpose": "L'host risolve: uphold (rimuove il contenuto + penalita) o dismiss (ripristina se era nascosto). Risolve a cascata tutte le segnalazioni sorelle sullo stesso contenuto.",
+      "auth": "host",
+      "request": "{decision: uphold|dismiss, note?: string<=500}",
+      "response": "200 {report:{id,status:'upheld'|'dismissed',resolved_at}, siblings_resolved:int, content_removed:bool}. 409 moderation.report_already_resolved (idempotente)."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{photo_id}/takedown",
+      "purpose": "Rimozione rapida della foto in cui il richiedente e il Soggetto ritratto (diritto, no review host, no penalita al Cacciatore, discrezione preservata).",
+      "auth": "participant",
+      "request": "path photo_id. Il dominio photo (PhotoPort.get_subject) verifica che current_participant == subject_participant_id.",
+      "response": "200 {removed:true, photo_id}. 403 moderation.not_subject se non e il soggetto ritratto. 404 se foto fuori scope."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/me/consent",
+      "purpose": "Il partecipante concede/revoca l'opt-in fotografabile. Su revoca (false) innesca il cascade di rimozione di tutte le foto attive che lo ritraggono. Endpoint condiviso con identity (aggiorna participant.is_photographable/consent_at); moderation esegue il cascade.",
+      "auth": "participant",
+      "request": "{is_photographable: boolean}",
+      "response": "200 {is_photographable, consent_at|consent_revoked_at, photos_removed:int (se revoca)}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/participants/{participant_id}/sanctions",
+      "purpose": "L'host sanziona un partecipante (warning/mute/ban). Il ban puo revocare la sessione via identity.",
+      "auth": "host",
+      "request": "{sanction_type: warning|mute|ban, reason?: string<=500, expires_at?: iso8601, report_id?: uuid}",
+      "response": "201 {sanction:{id,participant_id,sanction_type,starts_at,expires_at}}. 409 moderation.sanction_ban_exists se ban attivo gia presente."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/participants/{participant_id}/sanctions",
+      "purpose": "Storico sanzioni di un partecipante (host).",
+      "auth": "host",
+      "request": "path participant_id",
+      "response": "200 {items:[{id,sanction_type,reason,starts_at,expires_at,lifted_at,active:bool}]}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/sanctions/{sanction_id}/lift",
+      "purpose": "L'host revoca una sanzione (unban/unmute).",
+      "auth": "host",
+      "request": "path sanction_id",
+      "response": "200 {sanction:{id,lifted_at,lifted_by_participant_id}}. 409 moderation.sanction_already_lifted."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/blocks",
+      "purpose": "Il partecipante blocca un altro partecipante (no missive/chat, filtro feed).",
+      "auth": "participant",
+      "request": "{blocked_participant_id: uuid}",
+      "response": "201 {block:{id,blocked_participant_id,created_at}}. 400 moderation.cannot_block_self. 409 moderation.block_exists (idempotente)."
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/blocks/{blocked_participant_id}",
+      "purpose": "Rimuove un blocco.",
+      "auth": "participant",
+      "request": "path blocked_participant_id",
+      "response": "204. 404 se blocco inesistente."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/blocks",
+      "purpose": "Lista dei partecipanti bloccati dal richiedente.",
+      "auth": "participant",
+      "request": "query limit,cursor",
+      "response": "200 {items:[{blocked_participant_id,created_at}], page:{...}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/moderation/actions",
+      "purpose": "Audit log delle azioni di moderazione dell'evento (host).",
+      "auth": "host",
+      "request": "query action?, target_participant_id?, limit, cursor",
+      "response": "200 {items:[{id,actor_type,action,content_type,content_id,target_participant_id,reason,created_at}], page:{...}}"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "moderation.report_queued",
+      "direction": "server->client",
+      "payload": "{report_id, content_type, content_id, content_owner_participant_id, reason, distinct_reporters:int, auto_hidden:bool}",
+      "when": "Nuova segnalazione o superamento soglia auto-hide. Recapito MIRATO ai soli socket con role='host' (send_to_participant per ogni host). Unico evento che espone content_owner (per moderazione), mai in broadcast."
+    },
+    {
+      "name": "moderation.report_ack",
+      "direction": "server->client",
+      "payload": "{report_id, status:'received'}",
+      "when": "Conferma al segnalatore che la sua report e stata registrata (send_to_participant al reporter)."
+    },
+    {
+      "name": "moderation.content_hidden",
+      "direction": "server->client",
+      "payload": "{content_type, content_id}",
+      "when": "Auto-hide di sistema o hide manuale host: broadcast alla room evento cosi i client rimuovono il contenuto dalla vista. Payload minimale, nessuna identita."
+    },
+    {
+      "name": "moderation.photo_removed",
+      "direction": "server->client",
+      "payload": "{photo_id}",
+      "when": "Foto rimossa definitivamente (uphold report, takedown soggetto, cascade consenso). Broadcast room. Tipo canonico gia previsto dalla foundation."
+    },
+    {
+      "name": "moderation.content_removed",
+      "direction": "server->client",
+      "payload": "{content_type, content_id}",
+      "when": "Rimozione definitiva di contenuto non-foto (commento/missiva/chat/profilo). Broadcast room."
+    },
+    {
+      "name": "moderation.content_restored",
+      "direction": "server->client",
+      "payload": "{content_type, content_id}",
+      "when": "Report dismesso su contenuto precedentemente auto-nascosto: ripristino. Broadcast room."
+    },
+    {
+      "name": "moderation.participant_sanctioned",
+      "direction": "server->client",
+      "payload": "{sanction_type:'warning'|'mute'|'ban', reason?, expires_at?}",
+      "when": "Sanzione emessa: recapito MIRATO al solo partecipante sanzionato (discrezione, non broadcast). Per ban seguito da chiusura socket con close code 4403."
+    }
+  ],
+  "rules": [
+    "Dedup segnalazioni: vincolo UNIQUE (event_id, content_type, content_id, reporter_participant_id). Un secondo report dello stesso partecipante sullo stesso contenuto -> 409, nessun doppio conteggio.",
+    "Conteggio segnalatori distinti: distinct_reporters(c) = |{ r.reporter_participant_id : r.content=c AND r.status IN (pending, under_review) }|. Essendo il report unico per (contenuto,segnalatore), equivale al numero di report aperti su c.",
+    "Auto-hide (formula): IMMEDIATE_REASONS = {non_consensual_subject, nudity_explicit}. threshold = event.settings.moderation.auto_hide_threshold (default 3). should_auto_hide(c) = (esiste report su c con reason in IMMEDIATE_REASONS) OR (distinct_reporters(c) >= threshold). Se true e il contenuto non e gia nascosto: ContentPort.hide(content_id) -> moderation_action(action=content_hidden, actor_type=system) -> broadcast moderation.content_hidden -> notifica host moderation.report_queued(auto_hidden=true). Idempotente: se gia nascosto, no-op.",
+    "Macchina a stati report: pending -> under_review (host claim); {pending|under_review} -> upheld (host resolve uphold) oppure -> dismissed (host resolve dismiss). Stati terminali: upheld, dismissed. La visibilita del contenuto NON e uno stato del report: e proprieta del dominio proprietario, tracciata via moderation_action.",
+    "Risoluzione a cascata: risolvere una report su un contenuto risolve tutte le report sorelle aperte sullo stesso (event_id, content_type, content_id) con lo stesso esito, in un'unica transazione. uphold => ContentPort.remove(content_id) (hard-delete + purge S3 per foto) + penalita + moderation_action(content_removed) + broadcast moderation.photo_removed/content_removed. dismiss => se contenuto era auto-nascosto ContentPort.restore(content_id) + moderation_action(content_restored) + broadcast moderation.content_restored; report -> dismissed.",
+    "Rimozione rapida del Soggetto (takedown): il partecipante ritratto (current_participant == PhotoPort.get_subject(photo_id)) puo rimuovere la foto senza review ne penalita al Cacciatore. actor_type=self_subject, action=content_removed. Discrezione: l'identita del Cacciatore non viene mai rivelata al Soggetto.",
+    "Cascade revoca consenso (formula): su POST /me/consent {is_photographable:false}, insieme cascade = { photo : photo.subject_participant_id = me AND photo.status in stati attivi }. Per ogni foto: PhotoPort.remove + moderation_action(action=consent_cascade_removal, actor_type=self_subject) + broadcast moderation.photo_removed. Nessuna penalita al Cacciatore (ritiro consenso, non violazione). Da quel momento il dominio photo rifiuta nuove foto con subject=me.",
+    "Sanzione attiva (formula): is_active(s) = (s.lifted_at IS NULL) AND (s.expires_at IS NULL OR s.expires_at > now()). Un solo ban attivo per partecipante (unique parziale).",
+    "Enforcement sanzioni: mute => i domini attivi (photo/discovery/dialogue/betting) chiamano SanctionPort.assert_can_act(event_id, participant_id) prima di ogni mutazione; se mutato -> 403 moderation.participant_muted. ban => oltre a SanctionPort, moderation invoca identity per revocare la sessione (rigenera participant.session_token_id) forzando 401 sulle richieste e chiusura WS 4403.",
+    "Penalita punti (formula, solo su uphold): PENALTY = {non_consensual_subject:80, nudity_explicit:80, hate_speech:80, harassment:50, impersonation:40, inappropriate_photo:30, spam:20, other:20}. Alla prima report upheld su un contenuto: PointsPort.award_points(event_id, offender=content_owner_participant_id, delta=-PENALTY[reason], reason=moderation_penalty, source_domain='moderation', idempotency_key=f'moderation_penalty:{content_type}:{content_id}'). Idempotenza per contenuto: report multiple sullo stesso contenuto => una sola penalita. La rimozione per takedown/consenso NON penalizza.",
+    "Ordine transazionale: prima commit DB (report/action/sanzione + eventuale award_points nella stessa transazione del ledger via PointsPort) POI pubblicazione su EventBus. Il realtime e best-effort; lo stato si ricostruisce via REST alla riconnessione.",
+    "Rate limit anti-abuso: max event.settings.moderation.report_rate (default 5) report/minuto per partecipante -> 429 moderation.report_rate_limited. Previene inondazione della coda e conteggi auto-hide gonfiati.",
+    "Invariante di discrezione: nessun payload broadcast (content_hidden/removed/restored/photo_removed) contiene identita reali ne il collegamento Cacciatore->foto. content_owner_participant_id compare solo in moderation.report_queued diretto all'host e negli endpoint host.",
+    "Blocco personale: BlockPort.is_blocked(event_id, a, b) simmetrico per il rendering (a non vede contenuti/missive di b e viceversa a livello di consegna). I domini dialogue/photo/discovery consultano il port; moderation possiede solo la tabella."
+  ],
+  "points": [
+    {
+      "action": "Penalita per contenuto rimosso a seguito di segnalazione confermata (uphold)",
+      "points": "delta negativo per il content_owner (Cacciatore/autore): -80 (non_consensual_subject, nudity_explicit, hate_speech), -50 (harassment), -40 (impersonation), -30 (inappropriate_photo), -20 (spam, other)",
+      "notes": "Unica scrittura punti del dominio, sempre via PointsPort.award_points (mai su point_ledger direttamente). idempotency_key='moderation_penalty:{content_type}:{content_id}' -> una sola penalita per contenuto anche con report multiple. reason=moderation_penalty (nuovo valore additivo di PointReason). Nessun punto positivo generato da moderation."
+    },
+    {
+      "action": "(Opzionale, aperto) Penalita per segnalazione abusiva ripetuta",
+      "points": "delta negativo piccolo (es. -10) al reporter",
+      "notes": "reason=false_report_penalty. Da valutare: come identificare l'abuso senza deanonimizzare/scoraggiare le segnalazioni legittime. Vedi domande aperte; non incluso nel MVP finche non concordata la soglia."
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: le tabelle contengono solo participant_id (chiave tecnica per-evento), reason enum e testo libero limitato (note<=500). Nessun dato identificativo reale; contatti Instagram/telefono restano esclusivamente nel dominio dialogue.",
+    "Discrezione (art. foundation 6.5): il collegamento Cacciatore->foto (content_owner_participant_id) e visibile solo all'host e negli endpoint host, mai nei broadcast WS ne al Soggetto in caso di takedown.",
+    "Retention per-evento: ogni tabella ha event_id con FK ON DELETE CASCADE; il job di retention (DELETE FROM event) purga automaticamente report, action, sanzioni, blocchi e i content_snapshot. Le foto rimosse sono hard-deletate da S3 via PhotoPort entro il retention breve.",
+    "Diritto alla cancellazione (ErasablePort.erase_participant): reporter_participant_id, content_owner_participant_id, target_participant_id, actor_participant_id -> posti a NULL (tombstone); content_snapshot che contengono testo del partecipante -> svuotati; participant_block del partecipante -> cancellati; sanzioni -> cancellate. moderation_action conserva action e timestamp (senza identita) per dimostrabilita GDPR fino al retention dell'evento.",
+    "Consenso opt-in: la revoca (is_photographable=false) e sempre disponibile e innesca il cascade di rimozione delle foto esistenti che ritraggono il partecipante; consent_at/consent_revoked_at tracciati (audit) in identity.",
+    "content_snapshot: giustificato dalla necessita di revisione host anche dopo rimozione/edit del contenuto; e dato minimizzato (troncato), scopato per evento e purgato col retention. Tensione GDPR da confermare (vedi domande aperte).",
+    "Audit minimo: moderation_action e append-only e registra attore+timestamp di ogni decisione; i log applicativi non contengono contatti reali ne token.",
+    "Rimozione rapida (art. 6.4): auto-hide immediato dal feed su soglia/immediate reasons in attesa di review, e hard-delete S3 entro il ciclo di retention breve su uphold/takedown."
+  ],
+  "open_questions": [
+    "Proprieta di POST /api/v1/me/consent: identity (che possiede participant.is_photographable) o moderation? Proposta: endpoint in identity, cascade delegato a moderation via port. Confermare con il dominio identity/photo.",
+    "Le penalita possono portare participant.score sotto zero. Clampare a 0 (max(0, score+delta)) o consentire saldi negativi? La foundation ammette sum(delta) negativo; serve decisione condivisa con gamification per leaderboard e gazzettino.",
+    "Penalita per false report abusive: come rilevare l'abuso (es. N report dismessi consecutivi) senza deanonimizzare ne disincentivare segnalazioni legittime? Se adottata, aggiungere reason false_report_penalty al PointReason.",
+    "Ban: hard (revoca sessione + disconnessione WS 4403) sempre, o distinzione soft (solo blocco mutazioni via SanctionPort) per mute? Confermare che identity esponga un port per rigenerare session_token_id.",
+    "Enforcement mute/ban: introdurre una dependency condivisa require_not_sanctioned in shared/http/deps (che consulta SanctionPort) oppure lasciare il controllo ai singoli domini attivi? Impatta l'accoppiamento cross-dominio.",
+    "Review di contenuti privati (missive/chat): l'host puo leggere lo snapshot del contenuto segnalato? Bilanciare moderazione vs riservatezza delle comunicazioni private; definire quanto testo salvare in content_snapshot.",
+    "Segnalazioni pendenti a fine evento con host assente: chiusura automatica (dismiss? mantieni hidden?) e loro rappresentazione nel gazzettino. Definire policy di default.",
+    "Soglia auto_hide e reasons immediate: default (3 / non_consensual_subject+nudity_explicit) configurabili per evento in event.settings.moderation. Confermare naming chiave settings con la foundation.",
+    "Identificazione del Soggetto per il takedown prima che venga indovinato: si assume subject_participant_id noto al dominio photo (tag del Cacciatore). Confermare che photo esponga PhotoPort.get_subject e la semantica quando la foto non ha un subject taggato univoco."
+  ]
+}

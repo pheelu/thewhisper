@@ -1,0 +1,445 @@
+{
+  "domain": "gazette",
+  "summary": "Il dominio gazette genera \"Il Gazzettino\" dell'Alta Societa: edizioni periodiche (interim durante la serata, edizione finale alla chiusura, digest settimanale opzionale) che aggregano foto migliori, titoli piu originali, top player, recap scommesse, pettegolezzi anonimi, badge assegnati e statistiche della serata. Ogni edizione e uno SNAPSHOT immutabile costruito leggendo aggregati degli altri domini via porte read-only; produce un artefatto renderizzato condivisibile (link opaco pubblico + immagine/PDF su S3) e notifica i partecipanti via WebSocket. Non e fonte di verita dei punti: puo assegnare un bonus \"featured\" solo tramite PointsPort del dominio gamification.",
+  "tables": [
+    {
+      "name": "gazette_edition",
+      "purpose": "Una singola edizione del Gazzettino per un evento. Snapshot immutabile aggregato su una finestra temporale. Radice della gerarchia edition -> section -> entry.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (UUIDv7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE (scoping tenant/retention GDPR)"
+        },
+        {
+          "name": "kind",
+          "type": "enum gazette_edition_kind ('interim'|'nightly_final'|'weekly_digest')",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "status",
+          "type": "enum gazette_edition_status ('pending'|'generating'|'ready'|'published'|'failed'|'superseded')",
+          "constraints": "NOT NULL DEFAULT 'pending'"
+        },
+        {
+          "name": "sequence",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 1; progressivo per (event_id, kind), usato per ordinare le edizioni interim"
+        },
+        {
+          "name": "period_start",
+          "type": "timestamptz",
+          "constraints": "NOT NULL; inizio finestra aggregata (UTC)"
+        },
+        {
+          "name": "period_end",
+          "type": "timestamptz",
+          "constraints": "NOT NULL; CHECK (period_end > period_start)"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "constraints": "NOT NULL; titolo editoriale (es. 'Il Gazzettino della Sera - Edizione Finale')"
+        },
+        {
+          "name": "summary",
+          "type": "text",
+          "constraints": "NULL; occhiello/introduzione editoriale generata"
+        },
+        {
+          "name": "generated_by",
+          "type": "enum gazette_generated_by ('system_job'|'host_manual')",
+          "constraints": "NOT NULL DEFAULT 'system_job'"
+        },
+        {
+          "name": "generated_at",
+          "type": "timestamptz",
+          "constraints": "NULL; valorizzato quando status passa a 'ready'"
+        },
+        {
+          "name": "published_at",
+          "type": "timestamptz",
+          "constraints": "NULL; valorizzato quando status passa a 'published'"
+        },
+        {
+          "name": "share_slug",
+          "type": "text",
+          "constraints": "NULL; token opaco per link pubblico condivisibile, alfanumerico >=16 char, case-insensitive UNIQUE"
+        },
+        {
+          "name": "share_expires_at",
+          "type": "timestamptz",
+          "constraints": "NULL; scadenza del link pubblico; sempre <= event.retention_until"
+        },
+        {
+          "name": "render_key",
+          "type": "text",
+          "constraints": "NULL; chiave S3 dell'artefatto renderizzato sotto prefisso events/{event_id}/gazette/{edition_id}.{ext}"
+        },
+        {
+          "name": "render_format",
+          "type": "enum gazette_render_format ('html'|'image_png'|'pdf')",
+          "constraints": "NULL"
+        },
+        {
+          "name": "stats",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'; snapshot denormalizzato degli aggregati numerici (conteggi totali serata)"
+        },
+        {
+          "name": "idempotency_key",
+          "type": "text",
+          "constraints": "NOT NULL; deterministica su (kind, sequence|period) per rendere idempotente il job di generazione"
+        },
+        {
+          "name": "error",
+          "type": "jsonb",
+          "constraints": "NULL; dettaglio ultimo errore di generazione quando status='failed'"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_gazette_edition_event_id_idempotency_key UNIQUE (event_id, idempotency_key)",
+        "uq_gazette_edition_event_id_kind (event_id, kind, sequence) UNIQUE",
+        "uq_gazette_edition_share_slug UNIQUE su lower(share_slug)",
+        "ix_gazette_edition_event_id (event_id)",
+        "ix_gazette_edition_event_id_status (event_id, status)",
+        "ix_gazette_edition_share_slug parziale WHERE share_slug IS NOT NULL (lookup link pubblico)"
+      ]
+    },
+    {
+      "name": "gazette_section",
+      "purpose": "Sezione tipizzata e ordinata all'interno di un'edizione (foto in prima pagina, titolo piu originale, top player, recap scommesse, pettegolezzi, badge, statistiche, soggetto piu desiderato). Contiene copy editoriale non riferito a persone.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "edition_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->gazette_edition.id ON DELETE CASCADE"
+        },
+        {
+          "name": "kind",
+          "type": "enum gazette_section_kind ('headline_photos'|'most_original_title'|'top_players'|'bets_recap'|'gossip_of_the_night'|'badges_awarded'|'stats_overview'|'most_desired_subject')",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "position",
+          "type": "integer",
+          "constraints": "NOT NULL; ordinamento di rendering nell'edizione"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "subtitle",
+          "type": "text",
+          "constraints": "NULL"
+        },
+        {
+          "name": "body",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'; contenuto editoriale non-persona (es. testo recap scommesse, stat aggregate)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_gazette_section_edition_id_kind UNIQUE (edition_id, kind)",
+        "uq_gazette_section_edition_id_position UNIQUE (edition_id, position)",
+        "ix_gazette_section_event_id (event_id)"
+      ]
+    },
+    {
+      "name": "gazette_entry",
+      "purpose": "Voce normalizzata di una sezione che riferisce persone/foto (top player, foto in prima pagina, soggetto piu desiderato...). Snapshot dei valori al momento della generazione + riferimenti puliti per erase GDPR e integrita.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "edition_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->gazette_edition.id ON DELETE CASCADE"
+        },
+        {
+          "name": "section_id",
+          "type": "uuid",
+          "constraints": "NOT NULL; FK->gazette_section.id ON DELETE CASCADE"
+        },
+        {
+          "name": "position",
+          "type": "integer",
+          "constraints": "NOT NULL; ordinamento intra-sezione"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NULL; FK->participant.id ON DELETE SET NULL (persona citata; nullabile per erase/tombstone)"
+        },
+        {
+          "name": "photo_id",
+          "type": "uuid",
+          "constraints": "NULL; riferimento logico a photo.id del dominio photo (NESSUN FK cross-dominio hard; sincronizzato via handler su rimozione foto)"
+        },
+        {
+          "name": "display_name_snapshot",
+          "type": "text",
+          "constraints": "NOT NULL; pseudonimo (+ eventuale titolo nobiliare) al momento della generazione; sostituito con tombstone su erase"
+        },
+        {
+          "name": "title_snapshot",
+          "type": "text",
+          "constraints": "NULL; titolo misterioso della foto al momento dello snapshot"
+        },
+        {
+          "name": "value_label",
+          "type": "text",
+          "constraints": "NULL; etichetta leggibile (es. '142 punti', '5 scatti ricevuti')"
+        },
+        {
+          "name": "metric_value",
+          "type": "numeric",
+          "constraints": "NULL; valore numerico del ranking usato per l'ordinamento"
+        },
+        {
+          "name": "rank",
+          "type": "integer",
+          "constraints": "NULL; posizione in classifica dentro la sezione (1-based)"
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'; riferimenti aggiuntivi (es. reveal_state, reactions_count)"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "ix_gazette_entry_edition_id (edition_id, section_id, position)",
+        "ix_gazette_entry_event_id (event_id)",
+        "ix_gazette_entry_participant_id (participant_id) parziale WHERE participant_id IS NOT NULL (per erase_participant)",
+        "ix_gazette_entry_photo_id (photo_id) parziale WHERE photo_id IS NOT NULL (per sync rimozione foto)"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/gazette/editions",
+      "purpose": "Lista paginata delle edizioni del Gazzettino dell'evento corrente. I guest vedono solo status in ('published'); l'host vede tutte.",
+      "auth": "participant",
+      "request": "Query: ?kind=interim|nightly_final|weekly_digest (opzionale), ?limit=1..100 default 20, ?cursor=<opaque>. event_id preso dal token, mai dal client.",
+      "response": "200 {items:[{id, kind, status, sequence, title, period_start, period_end, published_at, render_format}], page:{next_cursor, limit}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/gazette/editions/latest",
+      "purpose": "Ultima edizione pubblicata dell'evento (comodita per la home/il post-chiusura).",
+      "auth": "participant",
+      "request": "Nessun body; event_id dal token.",
+      "response": "200 edizione completa (stessa forma di GET /editions/{id}); 404 gazette.no_edition se nessuna pubblicata"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/gazette/editions/{id}",
+      "purpose": "Dettaglio completo di un'edizione con sezioni ed entry (snapshot). Include presigned URL delle foto in prima pagina se ancora disponibili.",
+      "auth": "participant",
+      "request": "Path id. Guest autorizzato solo se status='published' e stessa event_id del token; altrimenti 404.",
+      "response": "200 {edition:{...}, sections:[{kind, title, subtitle, body, entries:[{rank, display_name, title_snapshot, value_label, photo_url?, participant_id?}]}]}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/gazette/editions",
+      "purpose": "Genera manualmente un'edizione (l'host puo forzare una edizione interim o rigenerare la finale prima della cadenza automatica).",
+      "auth": "host",
+      "request": "{kind:'interim'|'nightly_final', period_start?, period_end?}. Se periodo omesso: interim = da inizio evento/ultima interim a now; nightly_final = intera finestra evento. Idempotente su (event_id, kind, sequence).",
+      "response": "202 {edition:{id, status:'generating'|'pending', kind, sequence}}; 409 gazette.generation_in_progress"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/gazette/editions/{id}/publish",
+      "purpose": "Pubblica un'edizione in stato 'ready' rendendola visibile ai guest e diffondendola via WS.",
+      "auth": "host",
+      "request": "Path id; nessun body.",
+      "response": "200 edizione con status='published', published_at; 409 gazette.invalid_state se non 'ready'"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/gazette/editions/{id}/regenerate",
+      "purpose": "Rigenera un'edizione: crea una nuova edizione (sequence+1) e marca la precedente 'superseded'. Usata dopo rimozioni foto/erase per riflettere lo stato aggiornato.",
+      "auth": "host",
+      "request": "Path id; {reason?:string}.",
+      "response": "202 {edition:{id:<nuovo>, status:'generating', supersedes:<id>}}"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/gazette/editions/{id}/share",
+      "purpose": "Crea o ruota il link pubblico condivisibile di un'edizione pubblicata (genera share_slug e scadenza).",
+      "auth": "host",
+      "request": "{expires_in_hours?:int (default fino a event.retention_until, cap a quello)}.",
+      "response": "200 {share_url:'https://app.thewhisper/g/{share_slug}', share_expires_at}; 409 gazette.invalid_state se non 'published'"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/gazette/editions/{id}/share",
+      "purpose": "Revoca il link pubblico (azzera share_slug/scadenza).",
+      "auth": "host",
+      "request": "Path id; nessun body.",
+      "response": "204 No Content"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/gazette/editions/{id}/render",
+      "purpose": "Ottiene un presigned URL a scadenza breve dell'artefatto renderizzato (immagine/PDF) per condivisione social da parte del partecipante.",
+      "auth": "participant",
+      "request": "Path id; ?format=image_png|pdf (opzionale). Solo edizioni 'published'.",
+      "response": "200 {url:'<presigned>', format, expires_at}; 404 se non renderizzata; 409 gazette.render_not_ready"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/gazette/shared/{share_slug}",
+      "purpose": "Lettura PUBBLICA (no auth) di un'edizione pubblicata via link opaco. Espone solo pseudonimi e contenuti minimizzati; mai contatti reali ne identita del Cacciatore.",
+      "auth": "public",
+      "request": "Path share_slug. Rate-limited (429). Nega se scaduto/revocato/evento oltre retention.",
+      "response": "200 vista read-only dell'edizione (sezioni+entry con pseudonimi, foto via presigned URL brevi); 404 gazette.share_not_found; 410 gazette.share_expired"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "gazette.edition_ready",
+      "direction": "server->client",
+      "payload": "{edition_id, kind, sequence, title, generated_at}",
+      "when": "Il job di generazione completa e l'edizione passa a 'ready'. Recapito mirato ai soli socket con role='host' della room evento (review pre-pubblicazione), via send_to_participant sugli host."
+    },
+    {
+      "name": "gazette.published",
+      "direction": "server->client",
+      "payload": "{edition_id, kind, sequence, title, summary, published_at, share_url?, cover_photo_url?}",
+      "when": "Un'edizione viene pubblicata (host o auto-publish dell'interim/finale). broadcast(event_id) a tutta la room: i client mostrano il nuovo Gazzettino."
+    },
+    {
+      "name": "gazette.generation_failed",
+      "direction": "server->client",
+      "payload": "{edition_id, kind, error_code}",
+      "when": "Il job fallisce (status='failed'). Recapito mirato agli host per retry manuale."
+    },
+    {
+      "name": "gazette.final_ready",
+      "direction": "server->client",
+      "payload": "{edition_id, title, share_url}",
+      "when": "Alla chiusura evento (subscribe a event.closed), generata e pubblicata l'edizione nightly_final; broadcast prima della chiusura pulita del socket (close code 4000) cosi la PWA mostra il gazzettino finale."
+    }
+  ],
+  "rules": [
+    "MACCHINA A STATI edizione (gazette_edition_status): pending -> generating (job avviato); generating -> ready (aggregazione+render completati, generated_at=now); generating -> failed (errore, error valorizzato); failed -> generating (retry manuale/job); ready -> published (publish, published_at=now); ready|published -> superseded (regenerate crea sequence+1). Terminali di fatto: published (finale) e superseded. Transizioni illegali -> gazette.invalid_state (409).",
+    "POLITICA DI PUBBLICAZIONE: le edizioni 'interim' possono essere auto-pubblicate dal job (settings.gazette.interim_autopublish=true di default); 'nightly_final' e 'weekly_digest' richiedono publish host salvo autopublish_final=true; alla chiusura evento la finale e sempre auto-generata e auto-pubblicata (deve raggiungere i partecipanti prima della disconnessione).",
+    "CADENZA (scheduling in TZ locale event.timezone, logica in UTC via Clock): edizioni interim ogni settings.gazette.interim_cadence_minutes (default 60) mentre event.status='open'; l'ordinale sequence si incrementa per (event_id,'interim'). La finale su evento chiuso. period_start di un'interim = period_end dell'interim precedente (o event.starts_at); period_end = now() del job.",
+    "IDEMPOTENZA GENERAZIONE: idempotency_key = f'{kind}:{sequence}' per interim, f'nightly_final:{event_id}' per la finale, f'weekly_digest:{iso_week}' per il digest. Il vincolo uq_gazette_edition_event_id_idempotency_key rende no-op i retry/redelivery: un secondo job con stessa chiave non duplica l'edizione.",
+    "ORDINE PERSISTENZA->REALTIME (foundation 4.4): il job legge gli aggregati via porte read-only, costruisce edition+section+entry in un'unica transazione (status finale ready/published), COMMIT, poi pubblica su EventBus (gazette.published/edition_ready). Il core restituisce DomainEvent; l'adapter router li traduce in buste WS.",
+    "RANKING FOTO IN PRIMA PAGINA (section headline_photos): photo_rank = 3*correct_guesses + 2*reactions_count + 1*comments_count + 5*(1 se subject_revealed else 0). Ordine DESC per photo_rank, tie-break created_at ASC. Prendi le prime N = settings.gazette.headline_count (default 5). Esclude foto rimosse/segnalate/soft-deleted e foto di soggetti che hanno revocato il consenso.",
+    "RANKING TITOLO PIU ORIGINALE (section most_original_title): originality_score = title_reactions_count + 0.5*comments_count. Ordine DESC, top 3. Premia la creativita del Cacciatore ma NON ne rivela l'identita (entry mostra il titolo e il pseudonimo del soggetto se rivelato, mai il Cacciatore).",
+    "TOP PLAYER (section top_players): legge la leaderboard da gamification (participant.score DESC, proiezione del point_ledger). Top N = settings.gazette.leaderboard_count (default 3-5). Tie-break: created_at ASC (chi si e unito prima). Nessun ricalcolo punti nel gazette: solo lettura.",
+    "SOGGETTO PIU DESIDERATO (section most_desired_subject): desire_score = 2*photos_as_subject_count + 3*dialogue_invites_received + 1*correct_guesses_about_them. Ordine DESC, top 1-3. Solo partecipanti con is_photographable=true al momento dello snapshot; esclude chi ha revocato consenso o e stato erased.",
+    "RECAP SCOMMESSE (section bets_recap): aggrega dal dominio betting i round 'settled' nella finestra: numero round, pot totale, round piu partecipato, maggior vincitore singolo. Puro read; nessuna risoluzione scommesse qui (compete a betting).",
+    "PETTEGOLEZZI DELLA SERATA (section gossip_of_the_night): seleziona i migliori commenti/whisper pubblici per reactions_count (top K), rigorosamente pseudonimi. Le Missive Segrete NON entrano nel gazette (private, pseudonime): discrezione. Nessun contenuto deanonimizzante.",
+    "BADGE ASSEGNATI (section badges_awarded): legge da gamification i badge sbloccati nell'evento (Il Pettegolo piu Informato, Il Cacciatore piu Astuto, Il Soggetto piu Desiderato) con pseudonimo del vincitore.",
+    "STATISTICHE (section stats_overview): snapshot in edition.stats {participants_total, photos_total, comments_total, missives_total, bets_settled, points_awarded_total, reveals_total}. Contatori aggregati non riconducibili a singoli oltre a quanto gia esposto dal gioco.",
+    "BONUS FEATURED (unico punto di accredito del dominio): quando un'edizione nightly_final viene PUBBLICATA, gazette accredita bonus via PointsPort.award_points del dominio gamification (mai scrivendo point_ledger direttamente). Formula: headline #1 => +50, altre headline => +20; most_original_title #1 => +30; most_desired_subject #1 => +40. idempotency_key deterministica 'gazette_feature:{edition_id}:{participant_id}:{section_kind}' -> nessun doppio accredito su rigenerazioni/redelivery. I punti da 'top_players' NON vengono riaccreditati (gia contabilizzati dai domini sorgente): niente doppia contabilita.",
+    "SNAPSHOT IMMUTABILE: dopo lo stato 'ready' le entry non si modificano; l'unico modo per riflettere cambiamenti e regenerate (nuova edizione, la vecchia 'superseded') oppure gli handler GDPR (erase/rimozione foto) che intervengono in-place sulle entry gia emesse.",
+    "INTEGRAZIONE CROSS-DOMINIO: il core del gazette dipende da Protocol/porte read-only (PhotoStatsPort, DiscoveryStatsPort, BettingRecapPort, LeaderboardPort/BadgePort di gamification, PresencePort) implementate in infrastructure invocando i repository/use case dei domini proprietari. Nessun import di models.py altrui."
+  ],
+  "points": [
+    {
+      "action": "Foto pubblicata come headline #1 nella nightly_final",
+      "points": "+50",
+      "notes": "Assegnato al Cacciatore (participant_id della foto) alla pubblicazione della finale, via PointsPort, reason='gazette_feature', idempotency_key='gazette_feature:{edition_id}:{participant_id}:headline_photos'. Non e mai il gazette a scrivere il ledger."
+    },
+    {
+      "action": "Foto pubblicata tra le altre headline della nightly_final",
+      "points": "+20",
+      "notes": "Stessa via/idempotenza; metadata {rank}."
+    },
+    {
+      "action": "Titolo piu originale #1 nella nightly_final",
+      "points": "+30",
+      "notes": "reason='gazette_feature', idempotency_key '...:most_original_title'."
+    },
+    {
+      "action": "Soggetto piu desiderato #1 nella nightly_final",
+      "points": "+40",
+      "notes": "Solo se is_photographable=true e non erased. reason='gazette_feature', idempotency_key '...:most_desired_subject'."
+    },
+    {
+      "action": "Comparsa in top_players / badges_awarded / bets_recap",
+      "points": "+0 (nessun accredito)",
+      "notes": "Sono SOLO letture di punti gia contabilizzati da gamification/photo/discovery/betting: riaccreditare = doppia contabilita, vietato dalla foundation 5.4."
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: il gazette non raccoglie nuovi dati personali. Le entry contengono solo pseudonimi (display_name_snapshot) + participant_id tecnico + riferimenti a foto; mai nome reale, email, telefono o contatti Instagram (che vivono solo in dialogue dopo consenso bilaterale).",
+    "Discrezione (foundation 6.5): nessuna sezione/entry/payload WS espone l'identita del Cacciatore. Le foto in prima pagina e il titolo piu originale citano il titolo misterioso e, se rivelato, il pseudonimo del Soggetto, mai il Cacciatore. Le Missive Segrete sono escluse dal gazette.",
+    "Consenso: foto di soggetti con is_photographable=false (revocato) o foto rimosse/segnalate sono escluse da ogni nuova edizione; il ranking le filtra a monte.",
+    "Erase partecipante (ErasablePort.erase_participant(event_id, participant_id)): (a) gazette_entry.participant_id=NULL (FK SET NULL) e display_name_snapshot -> tombstone ('Un misterioso nobile'), title_snapshot/photo_url ripuliti se la persona era Soggetto; (b) rimozione della persona dalle stats identificabili; (c) invalidazione/purge degli artefatti S3 renderizzati delle edizioni che la citano (render_key azzerato, opzionale re-render); (d) revoca degli share_slug delle edizioni interessate se il rendering non e piu conforme.",
+    "Sync rimozione foto: su evento moderation.photo_removed / rimozione rapida del Soggetto, l'handler del gazette azzera photo_id/title_snapshot delle entry corrispondenti (ix_gazette_entry_photo_id) e purga la relativa immagine dal render; l'edizione puo essere rigenerata.",
+    "Retention per-evento: tutte le tabelle hanno event_id NOT NULL FK ON DELETE CASCADE -> il DELETE FROM event del job di retention propaga a edition/section/entry. Gli artefatti renderizzati stanno sotto events/{event_id}/gazette/ cosi il purge S3 per prefisso li raggiunge. share_expires_at sempre <= event.retention_until.",
+    "Link pubblico condivisibile: share_slug opaco (>=16 char), scadenza obbligatoria, revocabile, rate-limited; espone solo edizioni 'published' con pseudonimi e foto via presigned URL brevi. Nessun endpoint pubblico accetta event_id/participant_id dal client.",
+    "Audit minimo: generated_at, published_at, generated_by tracciano chi/quando ha prodotto e pubblicato; i log non contengono contatti reali ne token."
+  ],
+  "open_questions": [
+    "weekly_digest cross-evento: un digest settimanale che aggrega piu serate dello stesso locale confligge con lo scoping per-evento (event_id NOT NULL CASCADE) e con la retention/erase per-evento, e la stessa persona = participant diverso per evento (non correlabile). Decidere: (a) rinunciare al cross-evento e fare solo digest per-evento, oppure (b) introdurre uno store di snapshot anonimizzati a livello venue con proprio ciclo di retention, fuori dal CASCADE dell'evento. Chi possiede questo store?",
+    "Chi ospita lo scheduler della cadenza interim e della finale? Riuso dello stesso scheduler del dominio betting (round orari) o del cron di retention in identity/backoffice? Serve coordinamento per non duplicare infrastruttura di scheduling per-evento.",
+    "Bonus 'featured' (gazette_feature): confermare con gamification l'aggiunta additiva del valore all'enum PointReason e gli importi (+50/+20/+30/+40), ed evitare qualsiasi sovrapposizione con i punti gia assegnati (rischio doppia contabilita percepita anche se tecnicamente separata).",
+    "Rendering dell'artefatto condivisibile: generazione server-side HTML->immagine/PDF (headless browser/servizio) vs card generata client-side. Impatta infra (dipendenze di rendering) e i tempi del job. Formato di default per il social sharing?",
+    "Interim editions: auto-pubblicate live ai guest (default proposto) o sempre gated dall'host? Un feed di edizioni interim molto frequenti potrebbe essere rumoroso; confermare interim_cadence_minutes e autopublish di default in event.settings.",
+    "Erase dopo che un link pubblico e gia stato scaricato/diffuso: non e tecnicamente richiamabile. Serve una policy/disclaimer (es. sconsigliare share pubblico prima della finestra di erase, o scadenze molto brevi) da concordare con legal.",
+    "Tie-break e soglie: confermare i pesi delle formule (headline/originality/desire) e i conteggi N (headline_count, leaderboard_count) come feature flag in event.settings, e la strategia di tie-break (created_at ASC) con i domini sorgente."
+  ]
+}

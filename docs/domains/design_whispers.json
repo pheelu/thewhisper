@@ -1,0 +1,397 @@
+{
+  "domain": "photo (Foto Whisper) — canonicamente \"photo\" nella FOUNDATION; qui esteso come dominio \"whispers\"",
+  "summary": "Il dominio governa la \"Foto Whisper\": il Cacciatore scatta/carica su S3 la foto di un partecipante consenziente (opt-in), le assegna un titolo misterioso e la pubblica in un feed per-evento visibile solo ai partecipanti. Possiede il ciclo di vita della foto (macchina a stati draft→published→…→removed), l'identita segreta del Soggetto (la \"risposta\" del gioco di scoperta), la discrezione sull'identita del Cacciatore, e la reveal del Soggetto che abilita il dialogo. Commenti/indovinelli e chat vivono nei domini discovery/dialogue: il dominio photo espone porte per verificare l'indovinello e mantiene i contatori denormalizzati.",
+  "tables": [
+    {
+      "name": "photo",
+      "purpose": "Una Foto Whisper: contenuto su S3 + titolo misterioso + Cacciatore (discreto) + Soggetto segreto (risposta del gioco). Radice del ciclo di vita e del feed per-evento.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7). Identificatore pubblico della foto nel feed."
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL. FK->event.id ON DELETE CASCADE. Scoping tenant obbligatorio (ogni query filtra per event_id dal token)."
+        },
+        {
+          "name": "hunter_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL. FK->participant.id ON DELETE CASCADE. Il Cacciatore. Dato MINIMIZZATO: mai in payload broadcast/feed (discrezione §6.5)."
+        },
+        {
+          "name": "subject_participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL. FK->participant.id ON DELETE CASCADE. Il Soggetto ritratto = risposta segreta del gioco. Al momento della creazione DEVE avere is_photographable=true."
+        },
+        {
+          "name": "mysterious_title",
+          "type": "text",
+          "constraints": "NOT NULL. CHECK (char_length(mysterious_title) BETWEEN 1 AND 120). Titolo enigmatico assegnato dal Cacciatore."
+        },
+        {
+          "name": "storage_key",
+          "type": "text",
+          "constraints": "NOT NULL UNIQUE (uq_photo_storage_key). Chiave S3 opaca: events/{event_id}/photos/{photo_id}. Bucket privato."
+        },
+        {
+          "name": "content_type",
+          "type": "text",
+          "constraints": "NOT NULL DEFAULT 'image/jpeg'. CHECK (content_type IN ('image/jpeg','image/png','image/webp'))."
+        },
+        {
+          "name": "byte_size",
+          "type": "integer",
+          "constraints": "NULL. CHECK (byte_size IS NULL OR (byte_size > 0 AND byte_size <= 10485760)) — max 10MB. Valorizzato a publish."
+        },
+        {
+          "name": "width",
+          "type": "integer",
+          "constraints": "NULL. Metadato immagine (layout feed)."
+        },
+        {
+          "name": "height",
+          "type": "integer",
+          "constraints": "NULL. Metadato immagine."
+        },
+        {
+          "name": "blurhash",
+          "type": "text",
+          "constraints": "NULL. Placeholder progressivo (nessun dato personale)."
+        },
+        {
+          "name": "status",
+          "type": "enum(photo_status: draft|published|under_review|removed|archived)",
+          "constraints": "NOT NULL DEFAULT 'draft'. Vedi macchina a stati nelle rules."
+        },
+        {
+          "name": "subject_revealed",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false. true dopo che il Soggetto rivela la propria identita."
+        },
+        {
+          "name": "revealed_at",
+          "type": "timestamptz",
+          "constraints": "NULL. CHECK (subject_revealed = false OR revealed_at IS NOT NULL)."
+        },
+        {
+          "name": "published_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Settato all'ingresso in 'published'. CHECK (status <> 'published' OR published_at IS NOT NULL). Chiave di ordinamento feed."
+        },
+        {
+          "name": "removed_at",
+          "type": "timestamptz",
+          "constraints": "NULL. Settato all'ingresso in 'removed'/'under_review->removed'."
+        },
+        {
+          "name": "removed_reason",
+          "type": "enum(photo_removal_reason: subject_request|hunter_deleted|consent_revoked|moderation|host_action|expired)",
+          "constraints": "NULL. Non esposto pubblicamente in chiaro (discrezione)."
+        },
+        {
+          "name": "removed_by_participant_id",
+          "type": "uuid",
+          "constraints": "NULL. FK->participant.id ON DELETE SET NULL. Audit attore rimozione (host/subject/hunter)."
+        },
+        {
+          "name": "correct_guess_count",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0. Denormalizzato, incrementato dal dominio discovery via porta a ogni indovino distinto corretto. Base del bonus Cacciatore."
+        },
+        {
+          "name": "comment_count",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0. Denormalizzato per il feed."
+        },
+        {
+          "name": "retention_until",
+          "type": "timestamptz",
+          "constraints": "NULL. Retention foto breve = min(event.retention_until, event.closed_at + 7 giorni). Mai superiore a quella dell'evento (§6.3)."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (UTC). Mixin."
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(); onupdate. Mixin."
+        }
+      ],
+      "indexes": [
+        "pk_photo (id)",
+        "ix_photo_event_id (event_id)",
+        "uq_photo_storage_key (storage_key)",
+        "ix_photo_feed (event_id, status, published_at DESC, id DESC) — query principale del feed (keyset)",
+        "ix_photo_hunter (event_id, hunter_participant_id) — /photos/mine ed erase Cacciatore",
+        "ix_photo_subject (event_id, subject_participant_id) — /photos/of-me, reveal, erase Soggetto, gate consenso",
+        "ix_photo_retention_until (retention_until) WHERE retention_until IS NOT NULL — job purge S3",
+        "ck_photo_hunter_not_subject CHECK (hunter_participant_id <> subject_participant_id)"
+      ]
+    },
+    {
+      "name": "whisper_comment",
+      "purpose": "Commento di un partecipante su una Foto Whisper (testo libero pubblico ai partecipanti dell'evento). NB: confine con dominio discovery (vedi open_questions) — modellato qui perche il task 'whispers' include i commenti; gli indovinelli restano tabella separata in discovery.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuid7)."
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL. FK->event.id ON DELETE CASCADE. Scoping tenant."
+        },
+        {
+          "name": "photo_id",
+          "type": "uuid",
+          "constraints": "NOT NULL. FK->photo.id ON DELETE CASCADE."
+        },
+        {
+          "name": "author_participant_id",
+          "type": "uuid",
+          "constraints": "NULL. FK->participant.id ON DELETE CASCADE. NULL = tombstone dopo erase/anonimizzazione (§6.4)."
+        },
+        {
+          "name": "body",
+          "type": "text",
+          "constraints": "NOT NULL. CHECK (char_length(body) BETWEEN 1 AND 500)."
+        },
+        {
+          "name": "status",
+          "type": "enum(comment_status: visible|removed)",
+          "constraints": "NOT NULL DEFAULT 'visible'."
+        },
+        {
+          "name": "removed_at",
+          "type": "timestamptz",
+          "constraints": "NULL."
+        },
+        {
+          "name": "removed_reason",
+          "type": "enum(photo_removal_reason)",
+          "constraints": "NULL. Riusa l'enum del dominio."
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(). Mixin."
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(); onupdate. Mixin."
+        }
+      ],
+      "indexes": [
+        "pk_whisper_comment (id)",
+        "ix_whisper_comment_photo (photo_id, created_at DESC, id DESC) — lista commenti per foto (keyset)",
+        "ix_whisper_comment_event (event_id)",
+        "ix_whisper_comment_author (event_id, author_participant_id) — erase autore"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/api/v1/photos",
+      "purpose": "Il Cacciatore crea una bozza di Whisper e ottiene una presigned PUT URL per caricare la foto su S3. Non pubblica ancora.",
+      "auth": "participant (guest)",
+      "request": "{ subject_participant_id: uuid, mysterious_title: string(1..120), content_type: 'image/jpeg'|'image/png'|'image/webp' }. Validazioni: evento 'open' e in finestra; subject.is_photographable=true e consent_at NOT NULL; subject.role<>'host'; subject != hunter; subject appartiene allo stesso event_id; rate limit (max 20 foto/ora, max 3 foto attive dello stesso soggetto per Cacciatore).",
+      "response": "201 { photo: {id, mysterious_title, status:'draft'}, upload: { method:'PUT', url:<presigned>, storage_key, headers:{Content-Type}, expires_at } }. Errori: 403 photo.subject_not_photographable, 409 photo.self_photo_forbidden, 410 event.closed, 429 photo.rate_limited."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{id}/publish",
+      "purpose": "Conferma l'upload (verifica S3 HEAD dell'oggetto) e pubblica la Whisper nel feed. Accredita i punti photo_created.",
+      "auth": "participant (solo hunter proprietario)",
+      "request": "body opzionale { byte_size, width, height, blurhash }. Guard: status='draft'; oggetto S3 presente; consenso soggetto ancora valido (ri-check); evento ancora 'open'. Idempotente su re-invio (già published -> 200 no-op).",
+      "response": "200 { photo: {id, mysterious_title, status:'published', published_at, image_url:<presigned GET 300s>, blurhash} }. Errori: 409 photo.upload_missing, 409 photo.subject_consent_revoked, 403 photo.not_owner, 410 event.closed."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos",
+      "purpose": "Feed per-evento delle Whisper pubblicate. Visibile solo ai partecipanti dell'evento (scoping da token). Cacciatore e Soggetto NON esposti (salvo reveal).",
+      "auth": "participant",
+      "request": "query: ?limit=1..100(default 20)&cursor=<opaque>. Filtra sempre status='published' AND event_id=context.event_id. Ordine published_at DESC, id DESC.",
+      "response": "200 { items: [ {id, mysterious_title, image_url:<presigned 300s>, blurhash, published_at, comment_count, correct_guess_count, subject_revealed, subject: {participant_id, pseudonym, noble_title}|null (solo se subject_revealed) } ], page:{next_cursor, limit} }. Nessun hunter_id nel payload."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/{id}",
+      "purpose": "Dettaglio di una Whisper visibile (published, o propria bozza se hunter).",
+      "auth": "participant",
+      "request": "path id. 404 se removed/under_review/altrui-draft o fuori scope evento.",
+      "response": "200 { id, mysterious_title, image_url, blurhash, published_at, comment_count, correct_guess_count, subject_revealed, subject|null, is_mine:boolean (true se sei il Cacciatore) }."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/mine",
+      "purpose": "Le Whisper che HO scattato io (Cacciatore). Include bozze e stato.",
+      "auth": "participant",
+      "request": "query ?limit&cursor. Filtra hunter_participant_id=context.participant_id.",
+      "response": "200 Page[ {id, mysterious_title, status, image_url, published_at, correct_guess_count, subject:{participant_id,pseudonym}} ]. Qui il proprietario vede il proprio soggetto."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/of-me",
+      "purpose": "Le Whisper in cui IO sono il Soggetto (privato, solo per me). Base per decidere reveal o rimozione rapida.",
+      "auth": "participant",
+      "request": "query ?limit&cursor. Filtra subject_participant_id=context.participant_id AND status IN ('published','under_review').",
+      "response": "200 Page[ {id, mysterious_title, image_url, published_at, subject_revealed, comment_count, correct_guess_count} ]. Cacciatore non svelato."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{id}/reveal",
+      "purpose": "Il Soggetto rivela la propria identita: subject_revealed=true; abilita l'apertura chat nel dominio dialogue.",
+      "auth": "participant (solo il subject della foto)",
+      "request": "path id. Guard: status='published'; caller = subject_participant_id; non gia rivelato.",
+      "response": "200 { id, subject_revealed:true, revealed_at }. Emette photo.subject_revealed (broadcast). Errori: 403 photo.not_subject, 409 photo.already_revealed."
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/photos/{id}",
+      "purpose": "Rimozione rapida/discreta della Whisper. Soft-delete dal feed + hard-delete oggetto S3 (retention breve). Non svela mai il Cacciatore.",
+      "auth": "participant (hunter proprietario OR subject ritratto) OR host",
+      "request": "path id. Il ruolo determina removed_reason: subject->subject_request, hunter->hunter_deleted, host->host_action.",
+      "response": "204. Emette photo.removed (broadcast, discreto). Errori: 403 photo.remove_forbidden."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{id}/report",
+      "purpose": "Segnala una foto inappropriata. Mette la foto in 'under_review' (nascosta dal feed) in attesa dell'host. Delega al dominio moderation.",
+      "auth": "participant",
+      "request": "{ reason: string, note?: string }.",
+      "response": "202 { photo_id, status:'under_review' }. Emette photo.hidden (broadcast) + evento moderation. Idempotente per (photo_id, reporter)."
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/photos/{id}/comments",
+      "purpose": "Aggiunge un commento pubblico alla Whisper (confine discovery, vedi open_questions).",
+      "auth": "participant",
+      "request": "{ body: string(1..500) }. Guard: foto 'published'; evento 'open'.",
+      "response": "201 { id, body, author:{participant_id, pseudonym, noble_title}, created_at }. Incrementa photo.comment_count. Emette comment_added (namespace da concordare con discovery)."
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/photos/{id}/comments",
+      "purpose": "Lista commenti di una Whisper.",
+      "auth": "participant",
+      "request": "query ?limit&cursor. Filtra status='visible'. Ordine created_at DESC, id DESC.",
+      "response": "200 Page[ {id, body, author:{participant_id,pseudonym,noble_title}|null(tombstone), created_at} ]."
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/comments/{id}",
+      "purpose": "Rimuove un proprio commento (o host).",
+      "auth": "participant (autore) OR host",
+      "request": "path id.",
+      "response": "204. Decrementa comment_count. Errori 403 comment.remove_forbidden."
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "photo.published",
+      "direction": "server->client",
+      "payload": "{ photo_id, mysterious_title, image_url:<presigned 300s>, blurhash, published_at, comment_count:0, correct_guess_count:0 }. NESSUN hunter, NESSUN subject (discrezione + segreto).",
+      "when": "Broadcast alla room dell'evento dopo commit del publish. Il client aggiunge la card in cima al feed."
+    },
+    {
+      "name": "photo.of_you_published",
+      "direction": "server->client",
+      "payload": "{ photo_id, mysterious_title, image_url, published_at }.",
+      "when": "send_to_participant mirato al SOLO Soggetto ritratto, subito dopo publish. Notifica privata: 'una tua Whisper e stata pubblicata' -> puo rivelarsi o rimuoverla. Non svela il Cacciatore."
+    },
+    {
+      "name": "photo.subject_revealed",
+      "direction": "server->client",
+      "payload": "{ photo_id, subject:{ participant_id, pseudonym, noble_title }, revealed_at }.",
+      "when": "Broadcast quando il Soggetto usa /reveal. Tutti scoprono chi era; abilita UI di apertura dialogo (gestita da dialogue)."
+    },
+    {
+      "name": "photo.removed",
+      "direction": "server->client",
+      "payload": "{ photo_id }. Nessun motivo in chiaro, nessun attore, nessun Cacciatore (discrezione §6.5).",
+      "when": "Broadcast dopo rimozione (subject/hunter/host). I client tolgono la card dal feed."
+    },
+    {
+      "name": "photo.hidden",
+      "direction": "server->client",
+      "payload": "{ photo_id }.",
+      "when": "Broadcast quando la foto entra in 'under_review' (segnalata). Rimossa dal feed in attesa revisione host."
+    },
+    {
+      "name": "comment_added",
+      "direction": "server->client",
+      "payload": "{ photo_id, comment:{ id, body, author:{participant_id, pseudonym, noble_title}, created_at }, comment_count }.",
+      "when": "Broadcast a nuovo commento. NB: il registro tipi FOUNDATION prevede 'discovery.comment_added' -> naming da allineare con discovery (open question)."
+    }
+  ],
+  "rules": [
+    "MACCHINA A STATI photo_status: draft -> published (publish, hunter, upload S3 verificato); draft -> removed (annullamento/timeout upload); published -> under_review (segnalazione); under_review -> published (host restore); under_review -> removed (host reject); published -> removed (subject_request | hunter_deleted | consent_revoked | host_action); published -> archived (chiusura evento, dopo emissione gazzettino); removed = terminale (oggetto S3 purgato). Ogni transizione e guardata; transizioni illegali -> 409 photo.invalid_transition.",
+    "GATE CONSENSO (opt-in totale, §6.2): una foto puo essere creata SOLO se subject.is_photographable=true AND subject.consent_at IS NOT NULL. Ri-verifica al publish: se il Soggetto ha revocato tra draft e publish -> 409 photo.subject_consent_revoked e la bozza viene scartata. Nessuna foto di non-partecipanti o partecipanti non consenzienti.",
+    "GATE FINESTRA EVENTO: create/publish/comment/reveal ammessi solo con event.status='open' e starts_at <= now() <= coalesce(closed_at, ends_at). Fuori finestra -> 410 event.closed. In stato 'closed' resta la sola lettura (feed/gazzettino).",
+    "SELF-PHOTO VIETATO: hunter_participant_id <> subject_participant_id (CHECK DB + validazione use case).",
+    "FLUSSO UPLOAD: draft genera presigned PUT (scadenza 300s) su chiave events/{event_id}/photos/{photo_id}; publish esegue S3 HEAD per confermare l'esistenza dell'oggetto; se assente -> 409 photo.upload_missing. Nessun byte transita dal backend (client->S3 diretto).",
+    "VISIBILITA FEED: solo status='published' del proprio event_id; escluse draft/under_review/removed/archived. Ordine keyset published_at DESC, id DESC. Le presigned GET URL scadono in 300s e sono rigenerate a ogni lettura (resync REST post-reconnect).",
+    "DISCREZIONE CACCIATORE (§6.5): hunter_participant_id non compare MAI in feed, dettaglio pubblico o busta broadcast. Visibile solo al Cacciatore stesso (/photos/mine, is_mine) e all'host per moderazione. Il collegamento Cacciatore<->Soggetto emerge solo via dialogue dopo consenso.",
+    "SEGRETO DEL SOGGETTO: subject_participant_id e la risposta del gioco, non esposto finche subject_revealed=false. Esposto: (a) al Soggetto stesso in /photos/of-me, (b) al Cacciatore in /photos/mine, (c) a tutti dopo /reveal.",
+    "PORTA DI VERIFICA INDOVINELLO (cross-dominio): photo/core espone SubjectResolverPort.is_correct_subject(photo_id, guessed_participant_id)->bool e increment_correct_guess(photo_id) (transazionale). Il dominio discovery la invoca per risolvere gli indovinelli e aggiornare correct_guess_count. photo NON conosce discovery (dipendenza verso l'interno).",
+    "ANTI-MOLESTIA (etica): rate limit per Cacciatore max 20 foto/ora (429 photo.rate_limited) e max 3 foto attive dello stesso Soggetto per Cacciatore, per evitare targeting persecutorio dello stesso soggetto.",
+    "REVOCA CONSENSO: quando un partecipante imposta is_photographable=false, il gate blocca nuove foto verso di lui; le foto esistenti che lo ritraggono sono rimovibili su sua richiesta (removed_reason=consent_revoked). Use case interno on_consent_revoked(participant_id) disponibile per rimozione bulk su richiesta.",
+    "RETENTION FOTO: alla chiusura evento retention_until = min(event.retention_until, event.closed_at + 7 giorni). Job di purge elimina gli oggetti S3 sotto events/{event_id}/photos/ e le righe seguono il CASCADE da event. Foto 'removed' -> hard-delete S3 entro il ciclo di retention breve.",
+    "FORMULA PUNTI — PUBBLICAZIONE (fonte photo): all'ingresso in 'published' award_points(delta=+10, reason=photo_created, source_domain='photo', idempotency_key='photo_created:{photo_id}'). Idempotente: republish non riaccredita.",
+    "FORMULA PUNTI — BONUS CACCIATORE PER INDOVINO (definita qui, emessa a risoluzione indovinello): per ogni k-esimo indovino distinto corretto, il Cacciatore riceve HUNTER_GUESS_BONUS=+5, con cap a 5 indovini => bonus_totale_cacciatore = 5 * min(correct_guess_count, 5) (max +25). idempotency_key='photo_guess_bonus:{photo_id}:{guesser_id}', reason additivo photo_guess_bonus. Emesso via PointsPort a valle dell'incremento di correct_guess_count.",
+    "FORMULA PUNTI — INDOVINO (dominio discovery, riportata per coerenza): l'indovino corretto guadagna guesser_points = 10 + max(0, 6 - ordine) dove 'ordine' e il rank 1-based tra gli indovini corretti (1o:15, 2o:14, 3o:13, 4o:12, 5o:11, dal 6o:10). reason=subject_guessed, idempotency_key='subject_guessed:{photo_id}:{guesser_id}'. Owner: discovery.",
+    "REVEAL non assegna punti direttamente; abilita dialogue (chat/scambio contatti). I punti da missive/risposte sono di dialogue (missive_replied).",
+    "ERASE (§6.4, ErasablePort.erase_participant(event_id, participant_id)): foto con hunter=participant -> removed + purge S3; foto con subject=participant -> removed + purge S3; whisper_comment con author=participant -> author_participant_id=NULL (tombstone) o delete; contatori denormalizzati ricalcolati."
+  ],
+  "points": [
+    {
+      "action": "Pubblicare una Foto Whisper (Cacciatore)",
+      "points": "+10",
+      "notes": "reason=photo_created, source_domain='photo', idempotency='photo_created:{photo_id}'. Accreditato nella stessa transazione del passaggio a 'published'. Idempotente."
+    },
+    {
+      "action": "La propria foto viene indovinata (bonus Cacciatore)",
+      "points": "+5 per indovino distinto, cap +25",
+      "notes": "Formula 5*min(correct_guess_count,5). reason additivo photo_guess_bonus, idempotency='photo_guess_bonus:{photo_id}:{guesser_id}'. Emesso via PointsPort a risoluzione indovinello (trigger da discovery)."
+    },
+    {
+      "action": "Indovinare correttamente il Soggetto (indovino)",
+      "points": "+10..+15 (early bonus)",
+      "notes": "NON fonte di questo dominio: emesso da discovery (reason=subject_guessed). Riportato per coerenza della formula. photo fornisce solo SubjectResolverPort."
+    },
+    {
+      "action": "Titoli/badge (es. 'Il Cacciatore piu Astuto', 'Il Soggetto piu Desiderato')",
+      "points": "bonus badge",
+      "notes": "Owner gamification (reason=badge_bonus), derivati dal ledger e dai contatori foto (correct_guess_count, n. foto in cui sei soggetto). Non contabilizzati qui."
+    }
+  ],
+  "gdpr_notes": [
+    "Minimizzazione: nessun dato reale nel dominio; solo participant_id + pseudonimo per-evento. Nessun tracciamento delle visualizzazioni delle foto (niente tabella photo_view).",
+    "Storage: oggetti S3 in bucket privato, chiavi opache namespaced events/{event_id}/photos/{photo_id}; accesso solo via presigned GET a scadenza breve (300s); presigned PUT per upload a 300s. Il purge di retention raggiunge il prefisso events/{event_id}/.",
+    "Consenso opt-in verificato al draft e ri-verificato al publish (is_photographable + consent_at). Revoca -> stop nuove foto + rimozione su richiesta.",
+    "Discrezione Cacciatore (§6.5): hunter_participant_id mai in feed/dettaglio pubblico/broadcast; solo lato server, al Cacciatore stesso e all'host per moderazione.",
+    "Segreto Soggetto: subject_participant_id non esposto fino a /reveal; notifica dell'esistenza della foto inviata privatamente al solo Soggetto (photo.of_you_published).",
+    "Rimozione rapida della propria foto: il Soggetto puo DELETE immediato = soft-delete feed + hard-delete S3 entro retention breve, senza svelare il Cacciatore.",
+    "Retention per-evento e piu breve per le foto: min(event.retention_until, closed_at + 7 giorni), mai superiore all'evento. Purge S3 + CASCADE DB dalla riga event.",
+    "Erase (ErasablePort): foto come Cacciatore o Soggetto -> rimosse e purgate su S3; commenti -> anonimizzati (tombstone) o cancellati.",
+    "Audit minimo: consent_at (su participant), removed_by_participant_id, removed_reason, timestamp reveal/publish/remove. Nessun contatto reale, nessun token nei log."
+  ],
+  "open_questions": [
+    "Confine commenti photo vs discovery: la FOUNDATION assegna 'commenti/indovinelli/scoperta' a discovery e registra 'discovery.comment_added', ma il task 'whispers' include i commenti. Decidere se whisper_comment e il tipo WS vivono in photo o in discovery (raccomandazione: tabella e endpoint /photos/{id}/comments in discovery, con photo che espone solo il photo_id e i contatori; qui modellati per completezza).",
+    "Chi emette il bonus Cacciatore per indovino: proposto emesso da discovery al momento della risoluzione (che gia conosce guesser+hunter) tramite PointsPort, con formula definita in photo. Confermare l'owner dell'idempotency_key photo_guess_bonus e aggiungere il reason all'enum PointReason (estensione additiva via PR su shared/core/enums.py).",
+    "Tagging del Soggetto: il modello assume che il Cacciatore selezioni esplicitamente un participant consenziente come Soggetto (necessario per gate consenso e risoluzione indovinello). Escluso il caso 'foto senza soggetto definito' e le foto di non-partecipanti. Confermare.",
+    "Foto con piu soggetti: attualmente 1 solo subject_participant_id. Serve supporto multi-soggetto (tabella ponte photo_subject) o basta uno? Impatta consenso e gioco.",
+    "Rimozione automatica vs on-request alla revoca del consenso: §6.2 dice 'possono essere rimosse su richiesta'. Decidere se on_consent_revoked rimuove in automatico tutte le foto esistenti o solo blocca le nuove lasciando la rimozione al Soggetto.",
+    "Moderazione contenuto immagine/titolo: filtro profanita sul mysterious_title e validazione/rielaborazione immagine (re-encode server-side, spoglio EXIF/geolocalizzazione, generazione thumbnail/blurhash). Dove gira la pipeline (worker) e a chi appartiene (photo vs moderation)? Lo strip EXIF e rilevante GDPR.",
+    "Contratto reveal->dialogue: definire l'evento/porta con cui /reveal segnala a dialogue di abilitare la chat e lo scambio contatti (chi apre la chat, con quale consenso bidirezionale).",
+    "Presigned upload: PUT diretto vs POST policy (limiti dimensione lato S3), e strategia anti-abuso (foto orfane draft mai pubblicate -> job di cleanup delle bozze scadute > es. 15 min)."
+  ]
+}

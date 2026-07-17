@@ -1,12 +1,11 @@
-"""Configurazione applicativa caricata da variabili d'ambiente (.env).
+"""Configurazione applicativa (pydantic-settings): unica sorgente di config/env.
 
-Unica sorgente di verità per i settaggi; i domìni la ricevono via dependency
-injection e non leggono l'ambiente direttamente.
+I domini ricevono i valori via dependency injection e non leggono l'ambiente
+direttamente.
 """
 
 from functools import lru_cache
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,8 +20,18 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-dev-secret-please-rotate"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # --- Database ---
     database_url: str = "postgresql+asyncpg://whisper:whisper@localhost:5432/whisper"
+    db_echo: bool = False
 
+    # --- Sessione / cookie ---
+    session_cookie_name: str = "whisper_session"
+    session_cookie_secure: bool = False  # True in produzione (HTTPS)
+    session_cookie_samesite: str = "lax"
+    # Margine oltre la fine evento entro cui il token resta valido (ore).
+    session_grace_hours: int = 6
+
+    # --- S3 / MinIO ---
     s3_endpoint_url: str = "http://localhost:9000"
     s3_access_key: str = "whisper"
     s3_secret_key: str = "whisper-secret"
@@ -32,7 +41,7 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
     def is_dev(self) -> bool:

@@ -1,0 +1,644 @@
+{
+  "domain": "betting",
+  "summary": "Dominio \"Scommesse dell'Alta Societa\": ogni ora l'app apre una scommessa a tema (es. \"il Nobile piu Ritratto\", \"la Missiva piu Chiacchierata\") su cui i partecipanti puntano punti. Uno scheduler apre/blocca/risolve i round secondo la cadenza dell'evento; la risoluzione e automatica e deterministica (conteggi su finestra temporale letti dai domini proprietari via port), con payout parimutuel (a pool) e gestione esplicita dei pareggi. I punti si muovono SOLO tramite il point_ledger di gamification (escrow alla puntata, payout/refund alla risoluzione). Nome canonico foundation: betting; prefisso tabelle: bet_.",
+  "tables": [
+    {
+      "name": "bet_template",
+      "purpose": "Catalogo di configurazione (reference data, NO dati personali) dei tipi di scommessa oraria. Eccezione documentata alla regola di event-scoping: tabella globale senza event_id, esente da retention perche non contiene ne persone ne contenuti di gioco. I round ne fanno uno snapshot immutabile cosi che modifiche al catalogo non riscrivano la storia.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuidv7)"
+        },
+        {
+          "name": "code",
+          "type": "text",
+          "constraints": "NOT NULL, UNIQUE. Slug stabile es. 'most_photographed'"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "constraints": "NOT NULL. Titolo a tema es. 'Il Nobile piu Ritratto'"
+        },
+        {
+          "name": "prompt",
+          "type": "text",
+          "constraints": "NOT NULL. Domanda mostrata al partecipante"
+        },
+        {
+          "name": "resolution_rule",
+          "type": "enum bet_resolution_rule",
+          "constraints": "NOT NULL. Regola di risoluzione deterministica"
+        },
+        {
+          "name": "subject_type",
+          "type": "enum bet_subject_type",
+          "constraints": "NOT NULL. participant | photo | numeric"
+        },
+        {
+          "name": "stake_mode",
+          "type": "enum bet_stake_mode",
+          "constraints": "NOT NULL DEFAULT 'parimutuel'. parimutuel | fixed_reward"
+        },
+        {
+          "name": "option_source",
+          "type": "enum bet_option_source",
+          "constraints": "NOT NULL. materialized_participants | materialized_photos | binary_threshold | free_target"
+        },
+        {
+          "name": "betting_seconds",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 900. Durata finestra di puntata (opens_at->closes_at)"
+        },
+        {
+          "name": "measurement_seconds",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 3600. Durata finestra di misurazione della metrica"
+        },
+        {
+          "name": "min_stake",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 5, CHECK (min_stake >= 1)"
+        },
+        {
+          "name": "max_stake",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 100, CHECK (max_stake >= min_stake)"
+        },
+        {
+          "name": "fixed_reward",
+          "type": "integer",
+          "constraints": "NULL. Premio fisso (solo stake_mode='fixed_reward'), CHECK (fixed_reward IS NULL OR fixed_reward > 0)"
+        },
+        {
+          "name": "config",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'. Parametri regola (es. {\"threshold\":10} per over/under)"
+        },
+        {
+          "name": "is_active",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT true"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_bet_template_code UNIQUE (code)",
+        "ix_bet_template_is_active (is_active) WHERE is_active"
+      ]
+    },
+    {
+      "name": "bet_round",
+      "purpose": "Istanza di una scommessa aperta per una finestra temporale (il round orario). Contiene lo snapshot del template, la macchina a stati, le finestre di puntata e misurazione, e il riepilogo di risoluzione (pool, opzioni vincenti anche multiple per pareggio).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuidv7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "template_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->bet_template.id ON DELETE RESTRICT (reference config, non cancellabile se usata)"
+        },
+        {
+          "name": "template_code",
+          "type": "text",
+          "constraints": "NOT NULL. Snapshot"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "constraints": "NOT NULL. Snapshot"
+        },
+        {
+          "name": "prompt",
+          "type": "text",
+          "constraints": "NOT NULL. Snapshot"
+        },
+        {
+          "name": "resolution_rule",
+          "type": "enum bet_resolution_rule",
+          "constraints": "NOT NULL. Snapshot"
+        },
+        {
+          "name": "stake_mode",
+          "type": "enum bet_stake_mode",
+          "constraints": "NOT NULL. Snapshot"
+        },
+        {
+          "name": "status",
+          "type": "enum bet_round_status",
+          "constraints": "NOT NULL DEFAULT 'scheduled'. scheduled|open|locked|resolving|settled|void"
+        },
+        {
+          "name": "opens_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL. Apertura puntate"
+        },
+        {
+          "name": "closes_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL, CHECK (closes_at > opens_at). Blocco puntate (lock)"
+        },
+        {
+          "name": "measurement_start",
+          "type": "timestamptz",
+          "constraints": "NOT NULL. Inizio finestra metrica"
+        },
+        {
+          "name": "measurement_end",
+          "type": "timestamptz",
+          "constraints": "NOT NULL, CHECK (measurement_end > measurement_start). Fine finestra metrica"
+        },
+        {
+          "name": "resolves_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL. Istante di risoluzione (= measurement_end); usato dallo scheduler"
+        },
+        {
+          "name": "min_stake",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 5. Snapshot"
+        },
+        {
+          "name": "max_stake",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 100. Snapshot"
+        },
+        {
+          "name": "fixed_reward",
+          "type": "integer",
+          "constraints": "NULL. Snapshot"
+        },
+        {
+          "name": "config",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'. Snapshot parametri regola"
+        },
+        {
+          "name": "total_pool",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0, CHECK (total_pool >= 0). Somma stake non-void (denormalizzato)"
+        },
+        {
+          "name": "stake_count",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0. N. puntate attive (denormalizzato)"
+        },
+        {
+          "name": "winning_option_ids",
+          "type": "uuid[]",
+          "constraints": "NULL. Opzioni vincenti (array per gestire pareggi). Valorizzato al settlement"
+        },
+        {
+          "name": "winning_metric",
+          "type": "jsonb",
+          "constraints": "NULL. Valori metrica calcolati es. {\"<option_id>\": 4}"
+        },
+        {
+          "name": "settled_at",
+          "type": "timestamptz",
+          "constraints": "NULL"
+        },
+        {
+          "name": "void_reason",
+          "type": "text",
+          "constraints": "NULL. Motivo annullamento/refund (es. 'no_winner', 'host_void', 'insufficient_liquidity')"
+        },
+        {
+          "name": "settlement_idempotency_key",
+          "type": "text",
+          "constraints": "NULL, UNIQUE. Guardia anti doppio-settle = 'bet_settle:{round_id}'"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "ix_bet_round_event_id (event_id)",
+        "ix_bet_round_event_status (event_id, status)",
+        "ix_bet_round_event_opens_at (event_id, opens_at DESC)",
+        "ix_bet_round_resolves_at (resolves_at) WHERE status IN ('open','locked') -- driver scheduler",
+        "uq_bet_round_settlement_key UNIQUE (settlement_idempotency_key)",
+        "uq_bet_round_one_active UNIQUE (event_id) WHERE status IN ('open','locked') -- opzionale: max un round attivo per evento"
+      ]
+    },
+    {
+      "name": "bet_option",
+      "purpose": "Opzione selezionabile (esito) di un round. Per option_source materialized/binary le righe sono create all'apertura; per free_target sono create/upsertate lazy alla prima puntata su quel bersaglio. Riferisce partecipanti via FK e foto via soft-reference (nessuna FK cross-dominio: coupling evitato, cleanup garantito da event_id CASCADE).",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuidv7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "round_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->bet_round.id ON DELETE CASCADE"
+        },
+        {
+          "name": "label",
+          "type": "text",
+          "constraints": "NOT NULL. Display: pseudonimo del soggetto, titolo foto, 'Si'/'No'"
+        },
+        {
+          "name": "subject_participant_id",
+          "type": "uuid",
+          "constraints": "NULL, FK->participant.id ON DELETE CASCADE. Opzione = partecipante (soggetto)"
+        },
+        {
+          "name": "subject_photo_id",
+          "type": "uuid",
+          "constraints": "NULL. Soft-ref a photo.id (dominio photo, no FK). Opzione = foto"
+        },
+        {
+          "name": "meta",
+          "type": "jsonb",
+          "constraints": "NOT NULL DEFAULT '{}'. Extra es. {\"side\":\"over\",\"bound\":10}"
+        },
+        {
+          "name": "pool",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0, CHECK (pool >= 0). Somma stake su questa opzione (denormalizzato, per odds live)"
+        },
+        {
+          "name": "final_metric",
+          "type": "numeric",
+          "constraints": "NULL. Valore metrica al settlement"
+        },
+        {
+          "name": "is_winner",
+          "type": "boolean",
+          "constraints": "NOT NULL DEFAULT false"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "ix_bet_option_round_id (round_id)",
+        "ix_bet_option_event_id (event_id)",
+        "uq_bet_option_round_participant UNIQUE (round_id, subject_participant_id) WHERE subject_participant_id IS NOT NULL",
+        "uq_bet_option_round_photo UNIQUE (round_id, subject_photo_id) WHERE subject_photo_id IS NOT NULL",
+        "CHECK: esattamente uno tra subject_participant_id / subject_photo_id / (meta binaria) valorizzato secondo subject_type del round"
+      ]
+    },
+    {
+      "name": "bet_stake",
+      "purpose": "Puntata di un partecipante su un'opzione del round. I punti sono messi in escrow (delta negativo nel ledger) al piazzamento e pagati (delta positivo) al settlement. Una sola puntata attiva per (round, partecipante): cancellabile prima del lock (refund) e ripiazzabile.",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "constraints": "PK (uuidv7)"
+        },
+        {
+          "name": "event_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->event.id ON DELETE CASCADE"
+        },
+        {
+          "name": "round_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->bet_round.id ON DELETE CASCADE"
+        },
+        {
+          "name": "option_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->bet_option.id ON DELETE CASCADE"
+        },
+        {
+          "name": "participant_id",
+          "type": "uuid",
+          "constraints": "NOT NULL, FK->participant.id ON DELETE CASCADE"
+        },
+        {
+          "name": "amount",
+          "type": "integer",
+          "constraints": "NOT NULL, CHECK (amount > 0). Punti puntati (entro [min_stake,max_stake] e <= score corrente)"
+        },
+        {
+          "name": "status",
+          "type": "enum bet_stake_status",
+          "constraints": "NOT NULL DEFAULT 'placed'. placed|won|lost|refunded|void"
+        },
+        {
+          "name": "payout",
+          "type": "integer",
+          "constraints": "NOT NULL DEFAULT 0, CHECK (payout >= 0). Punti accreditati al settlement"
+        },
+        {
+          "name": "stake_ledger_key",
+          "type": "text",
+          "constraints": "NOT NULL. Idempotency escrow = 'bet_staked:{stake_id}'"
+        },
+        {
+          "name": "payout_ledger_key",
+          "type": "text",
+          "constraints": "NULL. Idempotency payout/refund = 'bet_won:{stake_id}' | 'bet_refunded:{stake_id}'"
+        },
+        {
+          "name": "placed_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL"
+        },
+        {
+          "name": "settled_at",
+          "type": "timestamptz",
+          "constraints": "NULL"
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now() (mixin)"
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "constraints": "NOT NULL DEFAULT now(), onupdate (mixin)"
+        }
+      ],
+      "indexes": [
+        "uq_bet_stake_round_participant UNIQUE (round_id, participant_id) WHERE status <> 'void' -- una sola puntata attiva per round",
+        "ix_bet_stake_option_id (option_id)",
+        "ix_bet_stake_round_id (round_id)",
+        "ix_bet_stake_participant_id (participant_id)",
+        "ix_bet_stake_event_id (event_id)"
+      ]
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/bets/rounds",
+      "purpose": "Lista round dell'evento (correnti + storici), filtrabile per stato. Scoped per event_id dal token.",
+      "auth": "participant",
+      "request": "query: status? (open|locked|settled|scheduled), limit (1..100 def 20), cursor (opaque keyset). Ordine created_at DESC,id DESC",
+      "response": "200 Page[BetRoundSummary]: {items:[{id,title,prompt,status,opens_at,closes_at,resolves_at,total_pool,stake_count,my_stake?:{option_id,amount,status,payout},winning_option_ids?}], page:{next_cursor,limit}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/bets/rounds/current",
+      "purpose": "Round attualmente attivo (open o locked) dell'evento, comodita per la UI.",
+      "auth": "participant",
+      "request": "nessuno",
+      "response": "200 BetRoundDetail | 204 se nessun round attivo"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/bets/rounds/{id}",
+      "purpose": "Dettaglio round con opzioni, pool/odds live, e la mia puntata.",
+      "auth": "participant",
+      "request": "path: id",
+      "response": "200 {round:{...}, options:[{id,label,pool,implied_odds,final_metric?,is_winner?}], my_stake?, my_score}. 404 se fuori scope evento"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/bets/rounds/{id}/stakes",
+      "purpose": "Piazza una puntata: mette in escrow i punti (delta negativo nel ledger) e crea/aggiorna il pool dell'opzione.",
+      "auth": "participant",
+      "request": "body: {option_id: uuid, amount: int}. Per free_target ammesso {target_participant_id} | {target_photo_id} al posto di option_id (opzione upsertata lazy)",
+      "response": "201 {stake:{id,option_id,amount,status:'placed'}, round:{total_pool,stake_count}, new_score}. 400 amount fuori range; 403 punti insufficienti / consenso mancante; 409 round non 'open' o gia puntato; 410 evento chiuso"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/bets/stakes/{id}",
+      "purpose": "Annulla la propria puntata prima del lock e rimborsa i punti (delta positivo, reason bet_refunded). Idempotente.",
+      "auth": "participant",
+      "request": "path: id (deve appartenere al participant del token)",
+      "response": "200 {stake:{status:'void'}, new_score}. 409 round gia 'locked'/'settled'; 404 non propria"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/bets/stakes/mine",
+      "purpose": "Storico delle proprie puntate e vincite nell'evento.",
+      "auth": "participant",
+      "request": "query: limit, cursor",
+      "response": "200 Page[MyStake]: {items:[{id,round_id,round_title,option_label,amount,status,payout,placed_at,settled_at}], page:{...}}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/bets/rounds/{id}/results",
+      "purpose": "Esito di risoluzione: opzioni vincenti, metriche, pool e mio payout.",
+      "auth": "participant",
+      "request": "path: id",
+      "response": "200 {status:'settled'|'void', winning_options:[{id,label,final_metric}], total_pool, winning_pool, tie:boolean, my_payout, void_reason?}. 409 se non ancora settled"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/bets/templates",
+      "purpose": "Catalogo dei tipi di scommessa (console organizzatore).",
+      "auth": "host",
+      "request": "query: is_active?",
+      "response": "200 [{id,code,title,prompt,resolution_rule,stake_mode,option_source,betting_seconds,measurement_seconds,min_stake,max_stake,fixed_reward,config,is_active}]"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/bets/rounds",
+      "purpose": "Host crea/pianifica manualmente un round scegliendo un template e i tempi (oltre allo scheduler automatico).",
+      "auth": "host",
+      "request": "body: {template_code, opens_at?, closes_at?, measurement_start?, measurement_end?, overrides?:{min_stake,max_stake,config}}. Default derivati da template + top-of-hour locale (event.timezone)",
+      "response": "201 BetRoundDetail (status 'scheduled' o 'open'). 400 tempi incoerenti; 409 round attivo gia presente (se vincolo one-active)"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/bets/rounds/{id}/open",
+      "purpose": "Forza l'apertura delle puntate (scheduled->open). Idempotente.",
+      "auth": "host",
+      "request": "path: id",
+      "response": "200 BetRoundDetail. 409 stato non transizionabile"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/bets/rounds/{id}/lock",
+      "purpose": "Forza il blocco delle puntate (open->locked). Idempotente.",
+      "auth": "host",
+      "request": "path: id",
+      "response": "200 BetRoundDetail. 409 stato non transizionabile"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/bets/rounds/{id}/settle",
+      "purpose": "Forza la risoluzione e i payout ora (locked/resolving->settled). Idempotente via settlement_idempotency_key. Per regole soggettive (host_pick) accetta la scelta manuale.",
+      "auth": "host",
+      "request": "path: id; body opzionale: {winning_option_ids?:[uuid]} per resolution_rule='host_pick'",
+      "response": "200 {round:settled, results}. 409 gia settled (no-op) o dati metrica non disponibili"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/bets/rounds/{id}/void",
+      "purpose": "Annulla il round e rimborsa tutte le puntate (bet_refunded per ognuna). Idempotente.",
+      "auth": "host",
+      "request": "path: id; body: {reason}",
+      "response": "200 {round:{status:'void'}, refunded_count}. 409 gia settled"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/v1/bets/config",
+      "purpose": "Host imposta cadenza e template attivi per l'evento (persistito in event.settings.betting).",
+      "auth": "host",
+      "request": "body: {interval_minutes?:int def 60, first_round_offset_minutes?:int, rotation?:[template_code], enabled?:boolean, min_participants?:int}",
+      "response": "200 {betting_config}"
+    }
+  ],
+  "realtime_events": [
+    {
+      "name": "betting.round_scheduled",
+      "direction": "server->client",
+      "payload": "{round_id,title,prompt,opens_at,closes_at,resolves_at,stake_mode}",
+      "when": "Broadcast quando lo scheduler (o host) crea un round futuro"
+    },
+    {
+      "name": "betting.round_opened",
+      "direction": "server->client",
+      "payload": "{round_id,title,prompt,options:[{id,label,pool}],min_stake,max_stake,closes_at}",
+      "when": "Broadcast quando il round passa a 'open' (puntate aperte)"
+    },
+    {
+      "name": "betting.pool_updated",
+      "direction": "server->client",
+      "payload": "{round_id,total_pool,stake_count,options:[{id,pool,implied_odds}]}",
+      "when": "Broadcast (throttled ~1-2s) ad ogni variazione di pool per aggiornare odds live. Nessun dato su CHI ha puntato (minimizzazione)"
+    },
+    {
+      "name": "betting.stake_confirmed",
+      "direction": "server->client",
+      "payload": "{round_id,stake_id,option_id,amount,new_score}",
+      "when": "send_to_participant: conferma privata al puntatore dopo il piazzamento"
+    },
+    {
+      "name": "betting.round_locked",
+      "direction": "server->client",
+      "payload": "{round_id,total_pool,stake_count,resolves_at}",
+      "when": "Broadcast quando il round passa a 'locked' (puntate chiuse)"
+    },
+    {
+      "name": "betting.round_settled",
+      "direction": "server->client",
+      "payload": "{round_id,title,winning_options:[{id,label,final_metric}],tie:boolean,total_pool,winning_pool,void:false}",
+      "when": "Broadcast dopo il calcolo della risoluzione e i payout (persist->publish)"
+    },
+    {
+      "name": "betting.payout_received",
+      "direction": "server->client",
+      "payload": "{round_id,stake_id,result:'won'|'lost',payout,profit,new_score}",
+      "when": "send_to_participant: esito privato per ogni puntatore del round settled"
+    },
+    {
+      "name": "betting.round_voided",
+      "direction": "server->client",
+      "payload": "{round_id,reason,refunded:true}",
+      "when": "Broadcast quando un round e annullato (no winner / host_void / liquidita insufficiente)"
+    },
+    {
+      "name": "betting.refund_issued",
+      "direction": "server->client",
+      "payload": "{round_id,stake_id,amount,new_score}",
+      "when": "send_to_participant: rimborso privato su void o cancellazione puntata"
+    }
+  ],
+  "rules": [
+    "MACCHINA A STATI round: scheduled -> open -> locked -> resolving -> settled; rami terminali: void (da qualsiasi stato pre-settled). Guardie temporali: now>=opens_at (scheduled->open); now>=closes_at (open->locked); now>=resolves_at (locked->resolving->settled). Transizioni idempotenti e protette da SELECT ... FOR UPDATE / advisory lock per-round per evitare doppia elaborazione multi-worker.",
+    "MACCHINA A STATI stake: placed -> {won|lost} al settlement; placed -> void su cancellazione pre-lock; placed -> refunded su void del round. 'won' e 'refunded' sono gli unici stati che generano un accredito.",
+    "SCHEDULER (tick ogni 60s, asyncio in lifespan MVP single-worker; predisposto a cron esterno): per ogni event con status='open' (a) se la cadenza e dovuta e non c'e round attivo, crea il prossimo round scegliendo un template attivo per rotazione/random da event.settings.betting.rotation; (b) avanza le macchine a stati dei round in base a opens_at/closes_at/resolves_at. Cadenza: event.settings.betting.interval_minutes (def 60), allineata al top-of-hour LOCALE via event.timezone; la logica ragiona in UTC (Clock.now()), la TZ serve solo per l'allineamento orario.",
+    "FINESTRE: puntata = [opens_at, closes_at); misurazione metrica = [measurement_start, measurement_end). Tipicamente si punta PRIMA che l'esito maturi (bet-before-outcome): measurement_start>=closes_at. resolves_at = measurement_end.",
+    "ORDINE PERSIST->PUBLISH (foundation §4.4): ogni transizione committa il DB (stato + ledger nella STESSA transazione) e SOLO DOPO pubblica il DomainEvent sull'EventBus. Il realtime e best-effort; lo stato si recupera via REST alla riconnessione.",
+    "VINCOLO PUNTATA: amount in [round.min_stake, round.max_stake] E amount <= participant.score corrente (niente scoperto). Verifica atomica: la deduzione escrow e l'update di participant.score avvengono nella stessa transazione del ledger insert; se il saldo e insufficiente -> 403 senza scrivere nulla.",
+    "ESCROW: al piazzamento si chiama PointsPort.award_points(delta=-amount, reason=bet_staked, idempotency_key='bet_staked:{stake_id}'). L'escrow riduce subito participant.score (proiezione del ledger).",
+    "FORMULA PAYOUT PARIMUTUEL: sia total_pool = somma amount di tutte le stake non-void; Wopts = insieme opzioni vincenti (>1 in caso di pareggio); winning_pool = somma amount delle stake su Wopts. Per ogni stake vincente i: payout_i = floor(amount_i * total_pool / winning_pool). Le stake perdenti hanno payout 0 (stake gia perso all'escrow). Profit_i = payout_i - amount_i. Poiche total_pool e stato dedotto e sum(payout_i) <= total_pool, il sistema non crea punti (deflazione da arrotondamento).",
+    "REMAINDER: rem = total_pool - sum(payout_i) >= 0 (residuo del floor). Assegnato deterministicamente alla stake vincente piazzata per prima (ORDER BY placed_at,id) per conservare i punti; scelta configurabile (in alternativa: scartato = deflazione).",
+    "GESTIONE PAREGGI: se piu opzioni hanno la stessa metrica massima, tutte sono vincenti (winning_option_ids array). winning_pool aggrega le stake su tutte le opzioni pari-merito e il pool si ridistribuisce pro-quota tra tutte -> pareggio gestito nativamente dalla formula parimutuel.",
+    "VOID / NO-WINNER: se winning_pool = 0 (nessuno ha puntato sull'opzione vincente) oppure stake_count < event.settings.betting.min_participants -> round.status='void', void_reason valorizzato, TUTTE le stake rimborsate (payout_i = amount_i, reason=bet_refunded, key='bet_refunded:{stake_id}'). Caso singolo puntatore -> di fatto rimborso.",
+    "FIXED_REWARD (modalita predizione gratuita, alternativa): nessun escrow al piazzamento; i predittori corretti ricevono round.fixed_reward ciascuno (reason=bet_won, key='bet_won:{stake_id}'), finanziati dalla casa (SORGENTE di punti). Pareggi: tutti i corretti premiati. I perdenti non perdono nulla.",
+    "IDEMPOTENZA SETTLEMENT: il settle imposta settlement_idempotency_key='bet_settle:{round_id}' (UNIQUE); un secondo settle -> conflitto -> no-op (409 doppio settle, foundation §5.2). Ogni payout usa key='bet_won:{stake_id}' cosi retry/redelivery non raddoppiano gli accrediti (ledger idempotente, foundation §5.4).",
+    "REGOLE DI RISOLUZIONE (deterministiche, metriche lette dai domini proprietari via read-port; betting non importa i loro models): [most_photographed_subject] metric(P)=COUNT(photo: subject_participant_id=P, status='published', published_at in finestra); winner=argmax. [most_active_hunter] metric(P)=COUNT(photo: hunter_participant_id=P, published in finestra); argmax (CAVEAT discrezione, vedi open questions). [most_original_title] metric(photo)=n. reactions/upvote del titolo in finestra (voto community via discovery); argmax. [most_guessed_subject] metric(P)=COUNT(guess corretti con soggetto=P in finestra). [most_desired_subject] metric(P)=COUNT(inviti al dialogo/chat aperte verso P in finestra). [photo_count_over_under] metric=COUNT(foto pubblicate in finestra); esito='over' se metric>config.threshold else 'under' (2 opzioni binarie). [host_pick] risoluzione manuale soggettiva decisa dall'host (winning_option_ids nel body del settle).",
+    "PORTE CROSS-DOMINIO (Protocol in betting/core, impl in infrastructure che chiama le repository dei domini proprietari): PhotoStatsPort.count_photos_by_subject(event_id,window)/count_by_hunter/count_total; DiscoveryStatsPort.reaction_counts(event_id,window)/correct_guesses_by_subject; DialogueStatsPort.invites_by_target. PointsPort.award_points (gamification). Nessuna scrittura diretta su point_ledger o participant.score.",
+    "MATERIALIZZAZIONE OPZIONI: binary_threshold -> 2 opzioni ('over'/'under') all'apertura; materialized_participants -> snapshot dei partecipanti is_photographable=true presenti all'apertura; materialized_photos -> foto in feed all'apertura; free_target -> nessuna opzione precreata, la riga bet_option viene upsertata alla prima puntata su quel bersaglio (UNIQUE su round_id+subject_*).",
+    "CORE PURO: gli use case (open_round, place_stake, cancel_stake, lock_round, resolve_round, void_round) ricevono repository e PointsPort per DI e restituiscono liste di DomainEvent (dataclass in core/); e l'adapter in infrastructure/router.py a tradurle in buste realtime e chiamare l'EventBus. Nessun import di SQLAlchemy/FastAPI/boto3 nel core."
+  ],
+  "points": [
+    {
+      "action": "Piazzamento puntata (parimutuel)",
+      "points": "-amount (escrow)",
+      "notes": "reason=bet_staked (nuovo, additivo a PointReason); key='bet_staked:{stake_id}'. Riduce participant.score nella stessa transazione. Bloccato se amount>score."
+    },
+    {
+      "action": "Vincita round (parimutuel)",
+      "points": "+payout = floor(amount*total_pool/winning_pool)",
+      "notes": "reason=bet_won (gia in foundation); key='bet_won:{stake_id}'. Payout ridistribuisce il pool tra i vincitori (pareggi inclusi). Non crea punti (deflazione da floor)."
+    },
+    {
+      "action": "Rimborso (void round / no-winner / cancellazione pre-lock)",
+      "points": "+amount",
+      "notes": "reason=bet_refunded (nuovo, additivo); key='bet_refunded:{stake_id}'. Ripristina l'escrow. Idempotente."
+    },
+    {
+      "action": "Predizione corretta (fixed_reward)",
+      "points": "+fixed_reward",
+      "notes": "reason=bet_won; key='bet_won:{stake_id}'. SORGENTE di punti finanziata dalla casa (nessun escrow al piazzamento). Usata per scommesse 'gratuite'."
+    },
+    {
+      "action": "Puntata perdente",
+      "points": "0 (stake gia perso all'escrow)",
+      "notes": "status stake -> 'lost'; nessun movimento ledger aggiuntivo (il -amount e gia stato contabilizzato al piazzamento)."
+    }
+  ],
+  "gdpr_notes": [
+    "Tutte le tabelle di gioco (bet_round, bet_option, bet_stake) hanno event_id NOT NULL FK->event ON DELETE CASCADE: il purge per retention (DELETE FROM event) le elimina in blocco. bet_template e reference/config senza dati personali (nessun event_id) -> esente da retention.",
+    "Minimizzazione: opzioni e puntate referenziano solo participant_id/pseudonimo e photo_id, mai identita reale o contatti. Le foto sono soft-reference (UUID) coerenti col prefisso S3 events/{event_id}/ purgato dal job di retention.",
+    "Discrezione (§6.5): i payload broadcast (pool_updated, round_settled) espongono solo pool aggregati e label pseudonime; CHI ha puntato cosa NON e mai in broadcast (solo send_to_participant al diretto interessato). Questo evita pressione sociale e deanonimizzazione.",
+    "Le regole basate sul Cacciatore (most_active_hunter) rischiano di deanonimizzare l'hunter, in tensione con la discrezione: da valutare esclusione, uso solo pseudonimo con consenso, o variante aggregata numerica (photo_count_over_under). Segnalato nelle domande aperte.",
+    "Le regole sui soggetti (most_photographed_subject) contano solo participant is_photographable=true (opt-in gia garantito a monte dal dominio photo): nessun conteggio su chi non ha acconsentito.",
+    "erase_participant(event_id, participant_id) (ErasablePort): (a) annulla e rimborsa le puntate 'placed' aperte del partecipante; (b) elimina/tombstone le sue bet_stake; (c) rimuove le bet_option dove e soggetto sui round non ancora settled; (d) sui round gia settled conserva solo metriche aggregate anonime (label->tombstone) per coerenza col gazzettino gia emesso. Le voci ledger sono gestite da gamification.",
+    "Audit: consenso/escrow/settlement tracciati via ledger e timestamp (placed_at, settled_at, closed) senza raccolta di dati personali aggiuntivi. I log applicativi non contengono contatti ne token."
+  ],
+  "open_questions": [
+    "Staking reale (parimutuel con deduzione) come default vs predizione gratuita (fixed_reward): decisione di prodotto. La deduzione rende le scommesse significative ma puo scoraggiare i timidi o creare hoarding di punti. Mix per template?",
+    "Le regole basate sul Cacciatore (most_active_hunter) confliggono con la discrezione §6.5: includere con pseudonimo consenziente, escludere, o sostituire con variante aggregata (over/under sul totale foto)?",
+    "Rivelare 'il piu fotografato' a meta serata puo 'spoilerare' il gioco di indovinelli e semi-deanonimizzare i soggetti: accettabile nella cornice ludica (pseudonimi gia pubblici) o serve ritardare/aggregare l'esito?",
+    "Set di candidati per le scommesse su partecipanti: tutti i presenti is_photographable, solo i soggetti gia apparsi, o free_target (punti su chiunque, opzione creata lazy)? Impatta UI e cardinalita opzioni.",
+    "Una sola puntata per round (scelta attuale, con cancel+ripiazza) vs hedging su piu opzioni vs top-up dell'importo? La scelta attuale semplifica idempotenza e ledger.",
+    "Remainder dell'arrotondamento floor: assegnare al primo vincitore (conserva punti) o scartare (deflazione)? Attualmente: primo vincitore.",
+    "Liquidita minima: min_participants per far partire un round parimutuel, altrimenti void+refund o fallback a fixed_reward? Valore di default da fissare (proposto 2).",
+    "Trasporto scheduler: loop asyncio in-process (MVP single-worker, foundation) vs cron esterno (CronCreate) vs APScheduler; multi-worker richiede advisory lock per-round. Da confermare col deploy.",
+    "'most_original_title' e soggettivo: risoluzione via voto community (reactions da discovery) o host_pick manuale? Serve che il dominio discovery esponga un conteggio reactions/upvote sui titoli.",
+    "Cadenza e rotazione template per evento (event.settings.betting) vs sequenza fissa: chi la definisce (host in console vs default di sistema)? Serve UI host per abilitare/disabilitare template.",
+    "Nuovi valori PointReason (bet_staked, bet_refunded) da aggiungere additivamente in shared/core/enums.py via PR sulla foundation: conferma naming."
+  ]
+}
