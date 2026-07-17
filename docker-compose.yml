@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: whisper-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-whisper}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-whisper}
+      POSTGRES_DB: ${POSTGRES_DB:-whisper}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./infra/data/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-whisper}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: whisper-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-whisper}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-whisper-secret}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - ./infra/data/minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Crea il bucket delle foto al primo avvio, poi esce.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-whisper} ${MINIO_ROOT_PASSWORD:-whisper-secret};
+      mc mb --ignore-existing local/${S3_BUCKET:-whisper-photos};
+      mc anonymous set none local/${S3_BUCKET:-whisper-photos};
+      echo 'bucket ready';
+      "
