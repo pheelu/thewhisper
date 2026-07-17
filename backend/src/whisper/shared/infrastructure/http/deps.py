@@ -17,6 +17,7 @@ from whisper.shared.infrastructure.db.session import get_session
 from whisper.shared.infrastructure.realtime.broker import EventBus
 from whisper.shared.infrastructure.realtime.hub import WebSocketHub
 from whisper.shared.infrastructure.security.session_auth import verify_session
+from whisper.shared.infrastructure.storage.s3 import S3Storage
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 AppSettings = Annotated[Settings, Depends(get_settings)]
@@ -30,7 +31,12 @@ def get_hub(request: Request) -> WebSocketHub:
     return request.app.state.hub
 
 
+def get_storage(request: Request) -> S3Storage:
+    return request.app.state.storage
+
+
 Bus = Annotated[EventBus, Depends(get_event_bus)]
+Storage = Annotated[S3Storage, Depends(get_storage)]
 
 
 def extract_token(request: Request, settings: Settings) -> str | None:

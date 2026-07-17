@@ -53,6 +53,21 @@ class S3Storage:
                 ExpiresIn=expires,
             )
 
+    async def presigned_get_many(self, keys: list[str], *, expires: int = 900) -> dict[str, str]:
+        out: dict[str, str] = {}
+        async with self._client() as s3:
+            for key in keys:
+                out[key] = await s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": self._bucket, "Key": key},
+                    ExpiresIn=expires,
+                )
+        return out
+
+    async def delete_object(self, key: str) -> None:
+        async with self._client() as s3:
+            await s3.delete_object(Bucket=self._bucket, Key=key)
+
     async def delete_prefix(self, prefix: str) -> None:
         async with self._client() as s3:
             paginator = s3.get_paginator("list_objects_v2")

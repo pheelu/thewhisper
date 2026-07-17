@@ -1,6 +1,5 @@
 """Modelli ORM di gamification: `point_ledger` (append-only, unica fonte punti)."""
 
-from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, Enum, ForeignKey, Index, Integer, Text

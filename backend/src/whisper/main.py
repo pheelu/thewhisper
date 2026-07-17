@@ -8,8 +8,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from whisper.discovery.infrastructure.router import router as discovery_router
 from whisper.gamification.infrastructure.router import router as gamification_router
 from whisper.identity.infrastructure.router import router as identity_router
+from whisper.photo.infrastructure.router import router as photo_router
+from whisper.profile.infrastructure.router import router as profile_router
 from whisper.settings import get_settings
 from whisper.shared.infrastructure.db.session import dispose_engine
 from whisper.shared.infrastructure.http.error_handlers import install_error_handlers
@@ -69,6 +72,9 @@ def create_app() -> FastAPI:
 
     app.include_router(identity_router)
     app.include_router(gamification_router)
+    app.include_router(profile_router)
+    app.include_router(photo_router)
+    app.include_router(discovery_router)
     register_ws(app)
     return app
 

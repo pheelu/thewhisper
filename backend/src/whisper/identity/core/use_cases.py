@@ -6,7 +6,6 @@ entità e, dove serve, `DomainEvent` puri che il router pubblica sul realtime.
 
 from dataclasses import dataclass, field
 from datetime import timedelta
-from uuid import UUID
 
 from whisper.identity.core.entities import Event, Participant
 from whisper.identity.core.repositories import EventRepository, ParticipantRepository
