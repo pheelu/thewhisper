@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { api, ApiError, WS_BASE } from "../shared/api";
 import type { LeaderboardEntry, Me } from "../shared/types";
+import { TabBar } from "../components/TabBar";
 
 export function Home() {
   const navigate = useNavigate();
@@ -88,7 +90,7 @@ export function Home() {
     : "Nobile";
 
   return (
-    <main className="screen">
+    <main className="screen screen--tabbed">
       <header className="topbar topbar--split">
         <div>
           <div className="topbar__event">{event.name}</div>
@@ -126,18 +128,29 @@ export function Home() {
         </ol>
       </section>
 
-      <section className="coming">
-        <h2 className="section-title">In arrivo</h2>
-        <p className="prose prose--sm">
-          Presto potrai scattare <strong>Foto Whisper</strong>, indovinare i Soggetti, scambiare
-          <strong> missive segrete</strong> e piazzare <strong>scommesse</strong>. Il salotto sta
-          crescendo…
-        </p>
+      <section>
+        <h2 className="section-title">Che cosa desideri fare?</h2>
+        <div className="actions">
+          <Link to="/capture" className="action-card">
+            <span className="action-card__icon">✎</span>
+            Scatta una Whisper
+          </Link>
+          <Link to="/feed" className="action-card">
+            <span className="action-card__icon">🖼</span>
+            Sbircia il feed
+          </Link>
+          <Link to="/profile" className="action-card">
+            <span className="action-card__icon">✒︎</span>
+            Il tuo segreto
+          </Link>
+        </div>
       </section>
 
-      <button className="btn btn--ghost btn--wide" onClick={leave}>
+      <button className="btn btn--ghost" onClick={leave}>
         Lascia la serata
       </button>
+
+      <TabBar />
     </main>
   );
 }
