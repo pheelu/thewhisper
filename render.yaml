@@ -1,0 +1,41 @@
+# Blueprint Render — un solo servizio web (Docker) che serve API + PWA.
+# Il DB (Postgres) e lo Storage (foto) sono su Supabase: imposta le env `sync: false`
+# nella dashboard Render dopo aver creato il progetto Supabase (vedi docs/DEPLOY.md).
+services:
+  - type: web
+    name: the-whisper
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      # --- Supabase Postgres (Session pooler consigliato: supporta i prepared statement) ---
+      - key: DATABASE_URL
+        sync: false
+      # Metti "true" SOLO se usi il Transaction pooler di Supabase.
+      - key: DB_DISABLE_PREPARED_STATEMENTS
+        value: "false"
+      # --- Supabase Storage (endpoint S3-compatibile) ---
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        value: eu-central-1
+      - key: S3_PUBLIC_URL
+        sync: false
+      # Single origin: nessuna origine cross-site da abilitare.
+      - key: CORS_ORIGINS
+        value: ""

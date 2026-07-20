@@ -4,9 +4,14 @@ lifespan (WebSocket hub, EventBus, scheduler, storage)."""
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from whisper.settings import Settings
 
 from whisper.discovery.infrastructure.router import router as discovery_router
 from whisper.gamification.infrastructure.router import router as gamification_router
@@ -76,7 +81,34 @@ def create_app() -> FastAPI:
     app.include_router(photo_router)
     app.include_router(discovery_router)
     register_ws(app)
+    _mount_frontend(app, settings)
     return app
+
+
+def _mount_frontend(app: FastAPI, settings: Settings) -> None:
+    """Serve la PWA buildata (produzione), con fallback SPA su index.html.
+
+    Registrato DOPO i router API: /api, /health, /docs vengono risolti prima; il
+    catch-all serve gli asset statici o l'index per le rotte lato client.
+    """
+    if not settings.frontend_dist:
+        return
+    dist = Path(settings.frontend_dist)
+    index = dist / "index.html"
+    if not index.is_file():
+        logger.warning("frontend_dist='%s' non contiene index.html: PWA non servita.", dist)
+        return
+
+    assets = dist / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str) -> FileResponse:
+        candidate = dist / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(str(candidate))
+        return FileResponse(str(index))
 
 
 app = create_app()

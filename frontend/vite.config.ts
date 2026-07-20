@@ -28,5 +28,18 @@ export default defineConfig({
   server: {
     host: true,
     port: 5173,
+    // In dev il frontend usa URL relativi: qui inoltriamo /api (incluso il
+    // WebSocket) al backend, così dev e produzione si comportano allo stesso modo.
+    proxy: {
+      "/api": {
+        target: process.env.VITE_DEV_API_TARGET ?? "http://localhost:8000",
+        changeOrigin: true,
+        ws: true,
+      },
+      "/health": {
+        target: process.env.VITE_DEV_API_TARGET ?? "http://localhost:8000",
+        changeOrigin: true,
+      },
+    },
   },
 });

@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # --- Database ---
     database_url: str = "postgresql+asyncpg://whisper:whisper@localhost:5432/whisper"
     db_echo: bool = False
+    # Disabilita i prepared statement di asyncpg: necessario dietro un pooler in
+    # transaction mode (es. Supabase Transaction pooler / PgBouncer).
+    db_disable_prepared_statements: bool = False
+
+    # --- Frontend statico (produzione: il backend serve la PWA buildata) ---
+    # Path alla cartella `dist` del frontend; se esiste, viene servita su "/".
+    frontend_dist: str = ""
 
     # --- Sessione / cookie ---
     session_cookie_name: str = "whisper_session"

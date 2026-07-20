@@ -1,5 +1,13 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000";
-export const WS_BASE = import.meta.env.VITE_WS_BASE_URL ?? "ws://localhost:8000";
+// In produzione frontend e backend condividono la stessa origine: gli URL sono
+// relativi (API_BASE = ""). In sviluppo il dev server Vite fa da proxy verso il
+// backend (vedi vite.config.ts). Si può forzare un backend esterno con VITE_API_BASE_URL.
+const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+
+export const WS_BASE =
+  import.meta.env.VITE_WS_BASE_URL ??
+  (typeof window !== "undefined"
+    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`
+    : "");
 
 export class ApiError extends Error {
   code: string;
