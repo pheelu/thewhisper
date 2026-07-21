@@ -6,6 +6,7 @@ import { game, type RosterEntry } from "../shared/game";
 import type { Me } from "../shared/types";
 import { useWhisperSocket } from "../shared/realtime";
 import { TabBar } from "../components/TabBar";
+import { IconMask, IconSparkle } from "../components/icons";
 
 export function Conversations() {
   const navigate = useNavigate();
@@ -76,7 +77,7 @@ export function Conversations() {
 
       {sentAlias && (
         <p className="success">
-          Missiva consegnata. Per il destinatario sei «{sentAlias}» — finché non ti rivelerai. 🕯
+          Missiva consegnata. Per il destinatario sei «{sentAlias}» — finché non ti rivelerai.
         </p>
       )}
 
@@ -118,14 +119,18 @@ export function Conversations() {
             <button className="convitem" onClick={() => navigate(`/chat/${c.conversation_id}`)}>
               <div className="convitem__row">
                 <span className="convitem__name">
-                  {c.counterpart.is_masked ? "🎭 " : ""}
+                  {c.counterpart.is_masked && <IconMask />}{" "}
                   {c.counterpart.display_name}
                   {c.counterpart.noble_title && <em> · {c.counterpart.noble_title}</em>}
                 </span>
                 {c.unread_count > 0 && <span className="badge">{c.unread_count}</span>}
               </div>
               <div className="convitem__preview">
-                {c.contact_exchanged ? "💫 contatti scambiati · " : ""}
+                {c.contact_exchanged && (
+                  <>
+                    <IconSparkle /> contatti scambiati ·{" "}
+                  </>
+                )}
                 {c.last_body ?? "…"}
               </div>
             </button>

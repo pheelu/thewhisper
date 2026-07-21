@@ -4,6 +4,7 @@ import { api, ApiError } from "../shared/api";
 import { game, type RosterEntry } from "../shared/game";
 import type { Me } from "../shared/types";
 import { TabBar } from "../components/TabBar";
+import { IconCamera } from "../components/icons";
 
 export function Capture() {
   const navigate = useNavigate();
@@ -85,7 +86,9 @@ export function Capture() {
           {preview ? (
             <img src={preview} alt="anteprima" />
           ) : (
-            <span className="capture-tile__cta">📷 Tocca per scattare o scegliere</span>
+            <span className="capture-tile__cta">
+              <IconCamera size="1.6rem" /> Tocca per scattare o scegliere
+            </span>
           )}
           <input
             type="file"

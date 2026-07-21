@@ -4,6 +4,7 @@ import { game, type Photo } from "../shared/game";
 import { ApiError } from "../shared/api";
 import { useWhisperSocket } from "../shared/realtime";
 import { TabBar } from "../components/TabBar";
+import { IconCandle, IconComment, IconMask, IconTarget } from "../components/icons";
 
 const LIVE = new Set([
   "photo.published",
@@ -49,7 +50,9 @@ export function Feed() {
 
       {!loading && photos.length === 0 && (
         <div className="empty">
-          <div className="crest crest--sm">🕯</div>
+          <div className="crest crest--sm">
+            <IconCandle size="2rem" />
+          </div>
           <p className="prose">
             Ancora nessuna Foto Whisper. Sii il primo Cacciatore: immortala un dettaglio
             intrigante di un ospite consenziente.
@@ -67,12 +70,20 @@ export function Feed() {
             <div className="whisper__body">
               <div className="whisper__title">« {p.mysterious_title} »</div>
               <div className="whisper__meta">
-                <span>💬 {p.comment_count}</span>
-                <span>🎯 {p.correct_guess_count}</span>
+                <span>
+                  <IconComment /> {p.comment_count}
+                </span>
+                <span>
+                  <IconTarget /> {p.correct_guess_count}
+                </span>
                 <span className={p.subject_revealed ? "revealed" : "mystery"}>
-                  {p.subject_revealed && p.subject
-                    ? `Svelato: ${p.subject.pseudonym}`
-                    : "Chi sarà mai?"}
+                  {p.subject_revealed && p.subject ? (
+                    `Svelato: ${p.subject.pseudonym}`
+                  ) : (
+                    <>
+                      <IconMask /> Chi sarà mai?
+                    </>
+                  )}
                 </span>
               </div>
             </div>

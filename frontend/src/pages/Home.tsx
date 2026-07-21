@@ -5,6 +5,7 @@ import { api, ApiError, WS_BASE } from "../shared/api";
 import type { LeaderboardEntry, Me } from "../shared/types";
 import { TabBar } from "../components/TabBar";
 import { BetCard } from "../components/BetCard";
+import { IconCamera, IconCameraOff, IconFeed, IconQuill } from "../components/icons";
 
 export function Home() {
   const navigate = useNavigate();
@@ -107,8 +108,16 @@ export function Home() {
           <span>{participant.score}</span> punti pettegolezzo
         </div>
         <button className="chip" onClick={toggleConsent}>
-          {participant.is_photographable ? "📸 Fotografabile" : "🚫 Non fotografabile"} · tocca per
-          cambiare
+          {participant.is_photographable ? (
+            <>
+              <IconCamera /> Fotografabile
+            </>
+          ) : (
+            <>
+              <IconCameraOff /> Non fotografabile
+            </>
+          )}{" "}
+          · tocca per cambiare
         </button>
       </section>
 
@@ -135,15 +144,15 @@ export function Home() {
         <h2 className="section-title">Che cosa desideri fare?</h2>
         <div className="actions">
           <Link to="/capture" className="action-card">
-            <span className="action-card__icon">✎</span>
+            <IconCamera size="1.5rem" className="action-card__icon" />
             Scatta una Whisper
           </Link>
           <Link to="/feed" className="action-card">
-            <span className="action-card__icon">🖼</span>
+            <IconFeed size="1.5rem" className="action-card__icon" />
             Sbircia il feed
           </Link>
           <Link to="/profile" className="action-card">
-            <span className="action-card__icon">✒︎</span>
+            <IconQuill size="1.5rem" className="action-card__icon" />
             Il tuo segreto
           </Link>
         </div>

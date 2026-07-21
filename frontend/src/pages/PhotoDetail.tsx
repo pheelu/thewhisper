@@ -10,6 +10,7 @@ import {
 } from "../shared/game";
 import type { Me } from "../shared/types";
 import { useWhisperSocket } from "../shared/realtime";
+import { IconMask, IconTarget, IconTrash } from "../components/icons";
 
 export function PhotoDetail() {
   const { id = "" } = useParams();
@@ -145,11 +146,17 @@ export function PhotoDetail() {
       <h1 className="detail-title">« {photo.mysterious_title} »</h1>
       <div className="detail-meta">
         {photo.subject_revealed && photo.subject ? (
-          <span className="revealed">Il Soggetto era {photo.subject.pseudonym} 🎭</span>
+          <span className="revealed">
+            <IconMask /> Il Soggetto era {photo.subject.pseudonym}
+          </span>
         ) : (
-          <span className="mystery">Chi sarà il misterioso Soggetto?</span>
+          <span className="mystery">
+            <IconMask /> Chi sarà il misterioso Soggetto?
+          </span>
         )}
-        <span>🎯 {photo.correct_guess_count} indovinati</span>
+        <span>
+          <IconTarget /> {photo.correct_guess_count} indovinati
+        </span>
       </div>
 
       {amSubject && !photo.subject_revealed && (
@@ -162,7 +169,7 @@ export function PhotoDetail() {
         <section className="guess-box">
           <h2 className="section-title">Indovina il Soggetto</h2>
           {myCorrect ? (
-            <p className="prose success">Hai indovinato! Che fiuto. 🎉</p>
+            <p className="prose success">Hai indovinato! Che fiuto.</p>
           ) : amSubject ? (
             <p className="prose prose--sm">Sei tu il Soggetto: goditi il mistero altrui.</p>
           ) : canGuess ? (
@@ -219,7 +226,7 @@ export function PhotoDetail() {
 
       {(amSubject || amHunter || isHost) && (
         <button className="btn btn--ghost btn--danger" onClick={onDelete} disabled={busy}>
-          {amSubject ? "🚫 Rimuovi questa foto (sei tu il Soggetto)" : "🗑 Rimuovi questa foto"}
+          <IconTrash /> {amSubject ? "Rimuovi questa foto (sei tu il Soggetto)" : "Rimuovi questa foto"}
         </button>
       )}
     </main>

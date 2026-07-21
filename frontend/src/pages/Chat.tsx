@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { ApiError } from "../shared/api";
 import { dialogue, type ConversationDetail } from "../shared/dialogue";
 import { useWhisperSocket } from "../shared/realtime";
+import { IconMask, IconSend, IconSparkle } from "../components/icons";
 
 export function Chat() {
   const { id = "" } = useParams();
@@ -82,11 +83,17 @@ export function Chat() {
   if (!conv) return <main className="screen screen--center">Apro la corrispondenza…</main>;
 
   const sysLabel = (b: string) =>
-    b === "identity_revealed"
-      ? "🎭 L'ammiratore ha rivelato la propria identità"
-      : b === "contact_exchanged"
-        ? "💫 Contatti scambiati!"
-        : b;
+    b === "identity_revealed" ? (
+      <>
+        <IconMask /> L'ammiratore ha rivelato la propria identità
+      </>
+    ) : b === "contact_exchanged" ? (
+      <>
+        <IconSparkle /> Contatti scambiati!
+      </>
+    ) : (
+      b
+    );
 
   return (
     <main className="screen screen--chat">
@@ -95,8 +102,7 @@ export function Chat() {
           ‹ missive
         </Link>
         <div className="topbar__event">
-          {conv.counterpart_masked ? "🎭 " : ""}
-          {conv.counterpart_display}
+          {conv.counterpart_masked && <IconMask />} {conv.counterpart_display}
         </div>
         <span />
       </header>
@@ -132,7 +138,7 @@ export function Chat() {
             .filter((c) => !c.mine)
             .map((c) => (
               <div key={c.participant_id}>
-                💫 {c.contact_type}: <strong>{c.contact_value}</strong>
+                <IconSparkle /> {c.contact_type}: <strong>{c.contact_value}</strong>
               </div>
             ))}
         </div>
@@ -159,7 +165,7 @@ export function Chat() {
             </form>
           ) : (
             <button className="chip" onClick={() => setShowContactBox(true)}>
-              💫 Proponi scambio contatti
+              <IconSparkle /> Proponi scambio contatti
             </button>
           )}
         </div>
@@ -174,8 +180,8 @@ export function Chat() {
           placeholder="Scrivi…"
           maxLength={1000}
         />
-        <button className="btn btn--gold" type="submit" disabled={busy || !body.trim()}>
-          ➤
+        <button className="btn btn--gold btn--send" type="submit" disabled={busy || !body.trim()}>
+          <IconSend size="1.15rem" />
         </button>
       </form>
     </main>

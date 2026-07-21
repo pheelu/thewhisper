@@ -1,24 +1,25 @@
 import { NavLink } from "react-router-dom";
+import { IconCamera, IconCrown, IconFeed, IconMissive, IconQuill } from "./icons";
 
 const tabs = [
-  { to: "/home", label: "Salotto", icon: "♛" },
-  { to: "/feed", label: "Feed", icon: "🖼" },
-  { to: "/capture", label: "Scatta", icon: "✎" },
-  { to: "/missives", label: "Missive", icon: "💌" },
-  { to: "/profile", label: "Profilo", icon: "✒︎" },
+  { to: "/home", label: "Salotto", Icon: IconCrown },
+  { to: "/feed", label: "Feed", Icon: IconFeed },
+  { to: "/capture", label: "Scatta", Icon: IconCamera },
+  { to: "/missives", label: "Missive", Icon: IconMissive },
+  { to: "/profile", label: "Profilo", Icon: IconQuill },
 ];
 
 export function TabBar() {
   return (
     <nav className="tabbar">
-      {tabs.map((t) => (
+      {tabs.map(({ to, label, Icon }) => (
         <NavLink
-          key={t.to}
-          to={t.to}
+          key={to}
+          to={to}
           className={({ isActive }) => "tabbar__item" + (isActive ? " tabbar__item--active" : "")}
         >
-          <span className="tabbar__icon">{t.icon}</span>
-          <span className="tabbar__label">{t.label}</span>
+          <Icon size="1.3rem" className="tabbar__icon" />
+          <span className="tabbar__label">{label}</span>
         </NavLink>
       ))}
     </nav>

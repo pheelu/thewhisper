@@ -3,6 +3,7 @@ import { ApiError } from "../shared/api";
 import { bets, type BetRound } from "../shared/bets";
 import { game, type RosterEntry } from "../shared/game";
 import { useWhisperSocket } from "../shared/realtime";
+import { IconDice, IconTrophy } from "./icons";
 
 function countdown(toIso: string): string {
   const ms = new Date(toIso).getTime() - Date.now();
@@ -78,7 +79,9 @@ export function BetCard({ meId }: { meId: string }) {
   return (
     <section className="bet-card">
       <div className="bet-card__head">
-        <span className="bet-card__label">🎲 Scommessa dell'Alta Società</span>
+        <span className="bet-card__label">
+          <IconDice /> Scommessa dell'Alta Società
+        </span>
         {round.status === "open" && (
           <span className="bet-card__timer">chiude tra {countdown(round.closes_at)}</span>
         )}
@@ -109,7 +112,10 @@ export function BetCard({ meId }: { meId: string }) {
           Hai puntato <strong>{round.my_stake.amount}</strong> su{" "}
           <strong>{round.my_stake.candidate_pseudonym}</strong>
           {round.my_stake.status === "won" && (
-            <span className="success"> — hai vinto {round.my_stake.payout}! 🏆</span>
+            <span className="success">
+              {" "}
+              — hai vinto {round.my_stake.payout}! <IconTrophy />
+            </span>
           )}
           {round.my_stake.status === "lost" && <span className="error"> — sfortuna…</span>}
           {round.my_stake.status === "refunded" && <span> — rimborsata</span>}
