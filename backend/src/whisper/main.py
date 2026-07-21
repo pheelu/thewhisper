@@ -13,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from whisper.settings import Settings
 
+from whisper.betting.infrastructure.job import make_betting_tick
+from whisper.betting.infrastructure.router import router as betting_router
 from whisper.dialogue.infrastructure.router import router as dialogue_router
 from whisper.discovery.infrastructure.router import router as discovery_router
 from whisper.gamification.infrastructure.router import router as gamification_router
@@ -45,6 +47,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:  # noqa: BLE001 — storage assente in dev: non deve impedire l'avvio
         logger.warning("Storage S3/MinIO non raggiungibile all'avvio.")
 
+    app.state.scheduler.register(
+        "betting.tick", make_betting_tick(app.state.event_bus), interval_seconds=60
+    )
     app.state.scheduler.start()
     try:
         yield
@@ -82,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(photo_router)
     app.include_router(discovery_router)
     app.include_router(dialogue_router)
+    app.include_router(betting_router)
     register_ws(app)
     _mount_frontend(app, settings)
     return app

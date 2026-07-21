@@ -4,6 +4,7 @@ Importato da Alembic (`migrations/env.py`) e all'avvio dell'app, così ogni tabe
 di dominio è registrata. Aggiungere qui l'import quando nasce un nuovo dominio.
 """
 
+from whisper.betting.infrastructure import models as _betting_models  # noqa: F401
 from whisper.dialogue.infrastructure import models as _dialogue_models  # noqa: F401
 from whisper.discovery.infrastructure import models as _discovery_models  # noqa: F401
 from whisper.gamification.infrastructure import models as _gamification_models  # noqa: F401

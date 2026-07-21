@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { api, ApiError, WS_BASE } from "../shared/api";
 import type { LeaderboardEntry, Me } from "../shared/types";
 import { TabBar } from "../components/TabBar";
+import { BetCard } from "../components/BetCard";
 
 export function Home() {
   const navigate = useNavigate();
@@ -110,6 +111,8 @@ export function Home() {
           cambiare
         </button>
       </section>
+
+      {participant.role === "guest" && <BetCard meId={participant.id} />}
 
       <section>
         <h2 className="section-title">Classifica dell'Alta Società</h2>

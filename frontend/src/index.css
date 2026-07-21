@@ -701,3 +701,83 @@ textarea:focus {
   padding: 0.4rem;
   border-radius: 999px;
 }
+
+/* --- scommesse --- */
+.bet-card {
+  background: linear-gradient(160deg, rgba(200, 162, 74, 0.12), var(--whisper-bg-soft));
+  border: 1px solid rgba(200, 162, 74, 0.4);
+  border-radius: 1rem;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.bet-card__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.bet-card__label {
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.68rem;
+  color: var(--whisper-gold-soft);
+}
+.bet-card__timer {
+  font-size: 0.78rem;
+  color: var(--whisper-muted);
+}
+.bet-card__title {
+  color: var(--whisper-cream);
+  font-size: 1.15rem;
+}
+.bet-card__pool {
+  color: var(--whisper-gold-soft);
+  font-size: 0.9rem;
+}
+.bet-pools {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--whisper-muted);
+}
+.bet-pools li {
+  display: flex;
+  justify-content: space-between;
+}
+.bet-form {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.bet-form select {
+  flex: 2;
+  min-width: 8rem;
+  background: var(--whisper-bg);
+  border: 1px solid rgba(183, 169, 201, 0.3);
+  border-radius: 0.7rem;
+  padding: 0.65rem;
+  color: var(--whisper-cream);
+  font-family: inherit;
+}
+.bet-form input {
+  width: 5rem;
+  background: var(--whisper-bg);
+  border: 1px solid rgba(183, 169, 201, 0.3);
+  border-radius: 0.7rem;
+  padding: 0.65rem;
+  color: var(--whisper-cream);
+  font-family: inherit;
+}
+.bet-mine {
+  font-size: 0.9rem;
+  color: var(--whisper-cream);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
