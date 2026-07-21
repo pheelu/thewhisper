@@ -702,6 +702,11 @@ textarea:focus {
   border-radius: 999px;
 }
 
+.btn--danger {
+  border-color: rgba(224, 138, 138, 0.6);
+  color: var(--whisper-danger);
+}
+
 /* --- scommesse --- */
 .bet-card {
   background: linear-gradient(160deg, rgba(200, 162, 74, 0.12), var(--whisper-bg-soft));

@@ -19,6 +19,8 @@ export function PhotoDetail() {
   const [comments, setComments] = useState<Comment[]>([]);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [amSubject, setAmSubject] = useState(false);
+  const [amHunter, setAmHunter] = useState(false);
+  const [isHost, setIsHost] = useState(false);
   const [myCorrect, setMyCorrect] = useState(false);
   const [attemptsLeft, setAttemptsLeft] = useState(3);
   const [result, setResult] = useState<GuessResult | null>(null);
@@ -39,21 +41,24 @@ export function PhotoDetail() {
   useEffect(() => {
     (async () => {
       try {
-        const [me, ph, cm, rt, mg, ofMe] = await Promise.all([
+        const [me, ph, cm, rt, mg, ofMe, mine] = await Promise.all([
           api.get<Me>("/api/v1/me"),
           game.photo(id),
           game.comments(id),
           game.roster(),
           game.myGuesses(id),
           game.ofMe().catch(() => [] as Photo[]),
+          game.mine().catch(() => [] as Photo[]),
         ]);
         setMeId(me.participant.id);
+        setIsHost(me.participant.role === "host");
         setPhoto(ph);
         setComments(cm);
         setRoster(rt);
         setMyCorrect(mg.some((g) => g.is_correct));
         setAttemptsLeft(Math.max(0, 3 - mg.length));
         setAmSubject(ofMe.some((p) => p.photo_id === id));
+        setAmHunter(mine.some((p) => p.photo_id === id));
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) navigate("/join");
       }
@@ -93,6 +98,21 @@ export function PhotoDetail() {
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Errore.");
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDelete() {
+    const msg = amSubject
+      ? "Vuoi far rimuovere questa foto che ti ritrae?"
+      : "Vuoi rimuovere questa foto?";
+    if (!window.confirm(msg)) return;
+    setBusy(true);
+    try {
+      await api.del(`/api/v1/photos/${id}`);
+      navigate("/feed");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Errore.");
       setBusy(false);
     }
   }
@@ -196,6 +216,12 @@ export function PhotoDetail() {
       </section>
 
       {error && <p className="error">{error}</p>}
+
+      {(amSubject || amHunter || isHost) && (
+        <button className="btn btn--ghost btn--danger" onClick={onDelete} disabled={busy}>
+          {amSubject ? "🚫 Rimuovi questa foto (sei tu il Soggetto)" : "🗑 Rimuovi questa foto"}
+        </button>
+      )}
     </main>
   );
 }
