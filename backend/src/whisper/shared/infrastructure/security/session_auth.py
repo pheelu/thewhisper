@@ -43,9 +43,7 @@ async def verify_session(db: AsyncSession, token: str, secret: str) -> SessionCo
         event_id = UUID(claims["eid"])
         jti = claims["jti"]
     except (jwt.PyJWTError, KeyError, ValueError) as exc:
-        raise UnauthorizedError(
-            "Sessione non valida o scaduta.", code="session.invalid"
-        ) from exc
+        raise UnauthorizedError("Sessione non valida o scaduta.", code="session.invalid") from exc
 
     row = (await db.execute(_LOOKUP_SQL, {"pid": participant_id, "eid": event_id})).first()
     if row is None:

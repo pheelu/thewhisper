@@ -77,11 +77,20 @@ class SqlAlchemyDialogueRepository:
         )
         await self._s.flush()
 
-    async def get_conversation(
-        self, event_id: UUID, conversation_id: UUID
-    ) -> Conversation | None:
+    async def get_conversation(self, event_id: UUID, conversation_id: UUID) -> Conversation | None:
         stmt = select(ConversationModel).where(
             ConversationModel.id == conversation_id, ConversationModel.event_id == event_id
+        )
+        row = (await self._s.execute(stmt)).scalar_one_or_none()
+        return _to_conversation(row) if row else None
+
+    async def get_conversation_for_update(
+        self, event_id: UUID, conversation_id: UUID
+    ) -> Conversation | None:
+        stmt = (
+            select(ConversationModel)
+            .where(ConversationModel.id == conversation_id, ConversationModel.event_id == event_id)
+            .with_for_update()
         )
         row = (await self._s.execute(stmt)).scalar_one_or_none()
         return _to_conversation(row) if row else None

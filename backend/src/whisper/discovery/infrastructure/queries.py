@@ -44,7 +44,9 @@ async def comments(
     return [
         {
             "comment_id": str(r.id),
-            "author_participant_id": str(r.author_participant_id) if r.author_participant_id else None,
+            "author_participant_id": str(r.author_participant_id)
+            if r.author_participant_id
+            else None,
             "author_pseudonym": r.author_pseudonym,
             "author_noble_title": r.author_noble_title,
             "body": r.body,
@@ -68,9 +70,7 @@ async def my_guesses(
     ]
 
 
-async def discovery_state(
-    session: AsyncSession, event_id: UUID, photo_id: UUID
-) -> dict[str, Any]:
+async def discovery_state(session: AsyncSession, event_id: UUID, photo_id: UUID) -> dict[str, Any]:
     row = (await session.execute(_STATE, {"eid": event_id, "ph": photo_id})).one_or_none()
     if row is None:
         return {

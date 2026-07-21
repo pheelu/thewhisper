@@ -32,12 +32,20 @@ export function PhotoDetail() {
 
   const refreshPhoto = useCallback(async () => {
     try {
-      setPhoto(await game.photo(id));
-      setComments(await game.comments(id));
-    } catch {
-      /* la foto potrebbe essere stata rimossa */
+      const [ph, cm, mg] = await Promise.all([
+        game.photo(id),
+        game.comments(id),
+        game.myGuesses(id),
+      ]);
+      setPhoto(ph);
+      setComments(cm);
+      setMyCorrect(mg.some((g) => g.is_correct));
+      setAttemptsLeft(Math.max(0, 3 - mg.length));
+    } catch (err) {
+      // foto rimossa nel frattempo: si torna al feed
+      if (err instanceof ApiError && err.status === 404) navigate("/feed");
     }
-  }, [id]);
+  }, [id, navigate]);
 
   useEffect(() => {
     (async () => {
@@ -61,13 +69,23 @@ export function PhotoDetail() {
         setAmSubject(ofMe.some((p) => p.photo_id === id));
         setAmHunter(mine.some((p) => p.photo_id === id));
       } catch (err) {
-        if (err instanceof ApiError && err.status === 401) navigate("/join");
+        if (err instanceof ApiError && err.status === 401) {
+          navigate("/join");
+        } else {
+          // foto rimossa o irraggiungibile: non restare sullo spinner infinito
+          navigate("/feed");
+        }
       }
     })();
   }, [id, navigate]);
 
   useWhisperSocket((msg) => {
-    if (msg.payload?.photo_id === id) void refreshPhoto();
+    if (msg.payload?.photo_id !== id) return;
+    if (msg.type === "photo.removed") {
+      navigate("/feed");
+      return;
+    }
+    void refreshPhoto();
   });
 
   async function onComment(e: FormEvent) {

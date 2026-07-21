@@ -44,3 +44,27 @@ class PhotoService:
 
     async def bump_correct_guess_count(self, photo_id: UUID, delta: int) -> int:
         return (await self._s.execute(_BUMP_CORRECT, {"d": delta, "pid": photo_id})).scalar_one()
+
+    async def remove_all_of_subject(
+        self, event_id: UUID, subject_id: UUID
+    ) -> list[tuple[UUID, str]]:
+        """Rimuove tutte le foto attive che ritraggono il Soggetto (revoca consenso).
+
+        Ritorna (photo_id, storage_key) delle foto rimosse, per broadcast + purge S3.
+        """
+        rows = (
+            await self._s.execute(
+                text(
+                    """
+                    UPDATE photo
+                    SET status = 'removed', removed_reason = 'consent_revoked',
+                        removed_at = now(), updated_at = now()
+                    WHERE event_id = :eid AND subject_participant_id = :pid
+                      AND status IN ('draft', 'published', 'under_review')
+                    RETURNING id, storage_key
+                    """
+                ),
+                {"eid": event_id, "pid": subject_id},
+            )
+        ).all()
+        return [(r.id, r.storage_key) for r in rows]

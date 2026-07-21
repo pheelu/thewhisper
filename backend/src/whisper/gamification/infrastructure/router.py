@@ -26,5 +26,7 @@ async def my_points(
     balance = await PointsService(db).get_balance(
         event_id=context.event_id, participant_id=context.participant_id
     )
-    recent = await queries.recent_movements(db, context.event_id, context.participant_id, limit=limit)
+    recent = await queries.recent_movements(
+        db, context.event_id, context.participant_id, limit=limit
+    )
     return {"balance": balance, "recent": recent}

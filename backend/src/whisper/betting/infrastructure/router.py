@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from whisper.betting.core.enums import BetRoundStatus
 from whisper.betting.infrastructure import queries
@@ -42,11 +43,16 @@ async def _publish(bus: EventBus, event_id: UUID, events: list[DomainEvent]) -> 
 async def current_round(db: DbSession, context: CurrentParticipant, bus: Bus) -> dict[str, Any]:
     svc = BettingService(db)
     now = _clock.now()
-    # tick "pigro": la lettura fa avanzare lo stato se lo scheduler non è ancora passato
-    events = await svc.tick(context.event_id, now)
-    if events:
-        await db.commit()
-        await _publish(bus, context.event_id, events)
+    # tick "pigro": la lettura fa avanzare lo stato se lo scheduler non è ancora
+    # passato. Due letture simultanee possono collidere sull'indice "un solo round
+    # attivo": in quel caso si ignora e si legge il round creato dall'altro.
+    try:
+        events = await svc.tick(context.event_id, now)
+        if events:
+            await db.commit()
+            await _publish(bus, context.event_id, events)
+    except IntegrityError:
+        await db.rollback()
     round_ = await svc.get_active_round(context.event_id)
     if round_ is None:
         return {"round": None}
@@ -81,9 +87,7 @@ async def place_stake(
 
 
 @router.delete("/stakes/{stake_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def cancel_stake(
-    stake_id: UUID, db: DbSession, context: CurrentParticipant, bus: Bus
-):
+async def cancel_stake(stake_id: UUID, db: DbSession, context: CurrentParticipant, bus: Bus):
     svc = BettingService(db)
     events = await svc.cancel_stake(
         event_id=context.event_id,

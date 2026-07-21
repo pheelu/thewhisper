@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from whisper.shared.core.errors import DomainError
@@ -40,6 +41,19 @@ def install_error_handlers(app: FastAPI) -> None:
                 code="error.unprocessable",
                 message="Payload non valido.",
                 details={"errors": exc.errors()},
+                request_id=_request_id(request),
+            ),
+        )
+
+    @app.exception_handler(IntegrityError)
+    async def _integrity_error(request: Request, exc: IntegrityError) -> JSONResponse:
+        # Vincolo UNIQUE violato da azioni concorrenti (doppio tap): 409, non 500.
+        return JSONResponse(
+            status_code=409,
+            content=error_body(
+                code="error.concurrent_conflict",
+                message="Azione già registrata: riprova.",
+                details=None,
                 request_id=_request_id(request),
             ),
         )

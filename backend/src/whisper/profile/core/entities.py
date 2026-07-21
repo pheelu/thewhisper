@@ -24,4 +24,6 @@ class Profile(TimestampedEntity):
     disclosed_publicly_at: datetime | None
 
     def compute_complete(self) -> bool:
-        return bool(self.secret_text and self.secret_text.strip() and self.motto and self.motto.strip())
+        return bool(
+            self.secret_text and self.secret_text.strip() and self.motto and self.motto.strip()
+        )

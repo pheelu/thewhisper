@@ -55,7 +55,9 @@ class PhotoModel(UUIDMixin, TimestampMixin, Base):
     removed_by_participant_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("participant.id", ondelete="SET NULL")
     )
-    comment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    comment_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     correct_guess_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
@@ -68,9 +70,7 @@ class PhotoModel(UUIDMixin, TimestampMixin, Base):
         CheckConstraint(
             "hunter_participant_id <> subject_participant_id", name="hunter_not_subject"
         ),
-        CheckConstraint(
-            "char_length(mysterious_title) BETWEEN 1 AND 120", name="title_len"
-        ),
+        CheckConstraint("char_length(mysterious_title) BETWEEN 1 AND 120", name="title_len"),
         CheckConstraint(
             "content_type IN ('image/jpeg','image/png','image/webp')", name="content_type"
         ),

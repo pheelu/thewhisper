@@ -92,7 +92,9 @@ async def open_event(event_repo: EventRepository, clock: Clock, event: Event) ->
     if event.status == EventStatus.open:
         return event
     if event.status != EventStatus.draft:
-        raise ConflictError("L'evento non può essere aperto da questo stato.", code="event.not_openable")
+        raise ConflictError(
+            "L'evento non può essere aperto da questo stato.", code="event.not_openable"
+        )
     event.status = EventStatus.open
     event.updated_at = clock.now()
     await event_repo.update(event)
@@ -113,7 +115,8 @@ async def close_event(
     event.retention_until = now + timedelta(days=RETENTION_DAYS)
     event.updated_at = now
     await event_repo.update(event)
-    await participant_repo.rotate_all_session_tokens(event.id)
+    # NB: le sessioni NON vengono revocate qui — lo stato `closed` consente la
+    # sola lettura (classifica finale/gazzettino). La revoca avviene all'archiviazione.
     return event, [DomainEvent(type="event.closed", payload={"event_id": str(event.id)})]
 
 

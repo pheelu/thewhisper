@@ -12,7 +12,9 @@ _ITERATIONS = 200_000
 def hash_secret(secret: str) -> str:
     salt = os.urandom(16)
     dk = hashlib.pbkdf2_hmac("sha256", secret.encode(), salt, _ITERATIONS)
-    return f"{_ALGO}${_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+    return (
+        f"{_ALGO}${_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+    )
 
 
 def verify_secret(secret: str, stored: str | None) -> bool:

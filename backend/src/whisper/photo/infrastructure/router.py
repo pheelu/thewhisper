@@ -1,9 +1,10 @@
 """Router HTTP delle Foto Whisper."""
 
+import contextlib
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 
 from whisper.gamification.infrastructure.points_service import PointsService
@@ -89,7 +90,10 @@ async def publish(
         hunter_id=context.participant_id,
     )
     await db.commit()
-    image_url = await storage.presigned_get(photo.storage_key)
+    # presign best-effort: la foto è già pubblicata e i punti accreditati
+    image_url: str | None = None
+    with contextlib.suppress(Exception):
+        image_url = await storage.presigned_get(photo.storage_key)
     await _publish(bus, context.event_id, events, image_url=image_url)
     item = await queries.detail(db, context.event_id, photo_id)
     return (await _attach_images([item], storage))[0] if item else {"photo_id": str(photo_id)}
@@ -166,7 +170,9 @@ async def reveal(
 
 
 @router.delete("/{photo_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_photo(photo_id: UUID, db: DbSession, context: CurrentParticipant, bus: Bus, storage: Storage):
+async def delete_photo(
+    photo_id: UUID, db: DbSession, context: CurrentParticipant, bus: Bus, storage: Storage
+):
     photo, events, storage_key = await use_cases.remove(
         SqlAlchemyPhotoRepository(db),
         _clock,
@@ -177,10 +183,7 @@ async def delete_photo(photo_id: UUID, db: DbSession, context: CurrentParticipan
     )
     await db.commit()
     await _publish(bus, context.event_id, events)
-    try:
+    # purge dell'oggetto S3 best-effort: la foto è già rimossa dal feed
+    with contextlib.suppress(Exception):
         await storage.delete_object(storage_key)
-    except Exception:  # noqa: BLE001 — purge best-effort
-        pass
-    from fastapi import Response
-
     return Response(status_code=status.HTTP_204_NO_CONTENT)

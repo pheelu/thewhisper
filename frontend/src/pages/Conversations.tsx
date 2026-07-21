@@ -94,6 +94,9 @@ export function Conversations() {
                 </option>
               ))}
             </select>
+            {targets.length === 0 && (
+              <small className="hint">Nessun altro nobile in sala al momento.</small>
+            )}
           </label>
           <label className="field">
             <span>La tua missiva (firmata con uno pseudonimo misterioso)</span>

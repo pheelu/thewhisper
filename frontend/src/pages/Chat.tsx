@@ -43,6 +43,7 @@ export function Chat() {
     e.preventDefault();
     if (!body.trim()) return;
     setBusy(true);
+    setError(null);
     try {
       await dialogue.sendMessage(id, body.trim());
       setBody("");
@@ -56,9 +57,12 @@ export function Chat() {
 
   async function onReveal() {
     setBusy(true);
+    setError(null);
     try {
       await dialogue.reveal(id);
       await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Errore di rete, riprova.");
     } finally {
       setBusy(false);
     }

@@ -68,7 +68,11 @@ async def whisper_ws(websocket: WebSocket) -> None:
 
     try:
         while True:
-            msg = await websocket.receive_json()
+            try:
+                msg = await websocket.receive_json()
+            except ValueError:
+                # frame non-JSON: si ignora, la connessione resta viva
+                continue
             if isinstance(msg, dict) and msg.get("type") == "ping":
                 await websocket.send_json(
                     build_envelope(type="pong", payload={}, event_id=context.event_id)

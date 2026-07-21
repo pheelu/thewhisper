@@ -17,7 +17,7 @@ from whisper.dialogue.infrastructure.schemas import (
 )
 from whisper.gamification.infrastructure.points_service import PointsService
 from whisper.shared.core.clock import SystemClock
-from whisper.shared.core.errors import ForbiddenError, NotFoundError
+from whisper.shared.core.errors import NotFoundError
 from whisper.shared.core.events import DomainEvent
 from whisper.shared.infrastructure.http.deps import (
     AppSettings,
@@ -43,11 +43,15 @@ async def _resolve_open_sender(db: AsyncSession, events: list[DomainEvent]) -> l
     for e in events:
         if e.type == "dialogue.message_received" and e.payload.get("sender_display") is None:
             pid = e.payload.get("sender_id_if_open")
-            name = (await db.execute(_PSEUDONYM, {"pid": pid})).scalar_one_or_none() if pid else None
+            name = (
+                (await db.execute(_PSEUDONYM, {"pid": pid})).scalar_one_or_none() if pid else None
+            )
             payload = {k: v for k, v in e.payload.items() if k != "sender_id_if_open"}
             payload["sender_display"] = name or "Sconosciuto"
             out.append(
-                DomainEvent(type=e.type, payload=payload, target_participant_id=e.target_participant_id)
+                DomainEvent(
+                    type=e.type, payload=payload, target_participant_id=e.target_participant_id
+                )
             )
         else:
             out.append(e)
@@ -224,6 +228,7 @@ async def reveal(
 ) -> dict[str, Any]:
     result = await use_cases.reveal_identity(
         _repo(db, settings),
+        PointsService(db),
         _clock,
         event_id=context.event_id,
         conversation_id=conversation_id,

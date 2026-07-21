@@ -31,13 +31,19 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
 
   const text = await res.text();
-  const parsed = text ? JSON.parse(text) : null;
+  let parsed: any = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    // risposta non-JSON (es. pagina d'errore del proxy): la trattiamo come ApiError
+    parsed = null;
+  }
 
-  if (!res.ok) {
+  if (!res.ok || (text && parsed === null)) {
     const err = parsed?.error ?? {};
     throw new ApiError(
-      err.message ?? "Errore imprevisto.",
-      err.code ?? "error.unknown",
+      err.message ?? `Errore di connessione (${res.status}). Riprova.`,
+      err.code ?? "error.http",
       res.status,
       err.details ?? {},
     );

@@ -208,4 +208,8 @@ async def remove(
     await repo.update(photo)
 
     # payload volutamente minimale: nessun motivo/attore (discrezione).
-    return photo, [DomainEvent(type="photo.removed", payload={"photo_id": str(photo_id)})], photo.storage_key
+    return (
+        photo,
+        [DomainEvent(type="photo.removed", payload={"photo_id": str(photo_id)})],
+        photo.storage_key,
+    )

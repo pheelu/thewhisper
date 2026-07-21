@@ -25,7 +25,9 @@ class ParticipantProfileModel(UUIDMixin, TimestampMixin, Base):
     motto: Mapped[str | None] = mapped_column(Text)
     avatar_seed: Mapped[str] = mapped_column(Text, nullable=False)
     accent_color: Mapped[str | None] = mapped_column(Text)
-    clues: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    clues: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
     reveal_stage: Mapped[ProfileRevealStage] = mapped_column(
         Enum(
             ProfileRevealStage,

@@ -96,6 +96,8 @@ async def submit_guess(
     candidate_id: UUID,
 ) -> GuessOutcome:
     ctx = await _published_context(photo_port, event_id, photo_id)
+    # serializza i guess sulla stessa foto: rank e contatori corretti anche in concorrenza
+    await repo.lock_photo_discovery(photo_id)
 
     if guesser_id in (ctx.hunter_participant_id, ctx.subject_participant_id):
         raise ForbiddenError("Conosci già la risposta.", code="discovery.insider")

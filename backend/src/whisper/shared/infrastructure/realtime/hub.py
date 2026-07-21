@@ -6,6 +6,7 @@ pubblicano sull'EventBus, che instrada qui. Un partecipante può avere più tab
 """
 
 import asyncio
+import contextlib
 from collections import defaultdict
 from typing import Any
 from uuid import UUID
@@ -41,10 +42,9 @@ class WebSocketHub:
         return {pid: set(socks) for pid, socks in room.items()}
 
     async def _safe_send(self, ws: WebSocket, message: dict[str, Any]) -> None:
-        try:
+        # socket morto/chiuso: recapito best-effort, l'errore si ignora
+        with contextlib.suppress(Exception):
             await ws.send_json(message)
-        except Exception:  # noqa: BLE001 — socket morto/chiuso: best-effort, lo ignoriamo
-            pass
 
     async def broadcast(self, event_id: UUID, message: dict[str, Any]) -> None:
         targets = [ws for socks in self._snapshot(event_id).values() for ws in socks]

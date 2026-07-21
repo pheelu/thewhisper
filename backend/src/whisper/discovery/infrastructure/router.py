@@ -95,9 +95,7 @@ async def submit_guess(
 
 
 @router.get("/{photo_id}/guesses/me")
-async def my_guesses(
-    photo_id: UUID, db: DbSession, context: CurrentParticipant
-) -> dict[str, Any]:
+async def my_guesses(photo_id: UUID, db: DbSession, context: CurrentParticipant) -> dict[str, Any]:
     return {"items": await queries.my_guesses(db, photo_id, context.participant_id)}
 
 

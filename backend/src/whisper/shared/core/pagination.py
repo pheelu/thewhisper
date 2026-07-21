@@ -9,10 +9,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Generic, TypeVar
 from uuid import UUID
-
-T = TypeVar("T")
 
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
@@ -50,7 +47,7 @@ class PageParams:
 
 
 @dataclass(frozen=True)
-class Page(Generic[T]):
+class Page[T]:
     items: list[T]
     next_cursor: str | None
     limit: int

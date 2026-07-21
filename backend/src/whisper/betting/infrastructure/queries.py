@@ -44,9 +44,7 @@ async def round_view(session: AsyncSession, round_row: Any, me: UUID) -> dict[st
 
     winners = None
     if round_row.winning_candidate_ids:
-        rows = (
-            await session.execute(_NAMES, {"ids": list(round_row.winning_candidate_ids)})
-        ).all()
+        rows = (await session.execute(_NAMES, {"ids": list(round_row.winning_candidate_ids)})).all()
         winners = [{"participant_id": str(r.id), "pseudonym": r.pseudonym} for r in rows]
 
     return {

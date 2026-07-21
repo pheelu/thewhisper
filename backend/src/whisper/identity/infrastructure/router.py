@@ -1,5 +1,6 @@
 """Router HTTP del dominio identity: /events, /join, /me, /me/consent."""
 
+import contextlib
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -36,6 +37,7 @@ from whisper.shared.infrastructure.http.deps import (
     Bus,
     CurrentParticipant,
     DbSession,
+    Storage,
 )
 from whisper.shared.infrastructure.realtime.broker import EventBus, RealtimeMessage
 
@@ -144,9 +146,7 @@ async def _load_event_for_host(db, context, event_id: UUID) -> Event:
 
 
 @router.post("/events/{event_id}/open", response_model=EventHostView)
-async def open_event(
-    event_id: UUID, db: DbSession, context: CurrentParticipant
-) -> EventHostView:
+async def open_event(event_id: UUID, db: DbSession, context: CurrentParticipant) -> EventHostView:
     if not context.is_host:
         raise ForbiddenError("Operazione riservata all'organizzatore.", code="session.not_host")
     event = await _load_event_for_host(db, context, event_id)
@@ -171,7 +171,9 @@ async def close_event(
 
 
 @router.get("/events/{event_id}/qr.png", include_in_schema=False)
-async def event_qr(event_id: UUID, db: DbSession, context: CurrentParticipant, settings: AppSettings):
+async def event_qr(
+    event_id: UUID, db: DbSession, context: CurrentParticipant, settings: AppSettings
+):
     """QR del link di ingresso (PNG). Visibile all'host della serata."""
     import io
 
@@ -192,7 +194,11 @@ async def event_qr(event_id: UUID, db: DbSession, context: CurrentParticipant, s
 
 @router.post("/events/{event_id}/host-session", response_model=HostSessionResponse)
 async def host_session(
-    event_id: UUID, body: HostSessionRequest, response: Response, db: DbSession, settings: AppSettings
+    event_id: UUID,
+    body: HostSessionRequest,
+    response: Response,
+    db: DbSession,
+    settings: AppSettings,
 ) -> HostSessionResponse:
     event_repo = SqlAlchemyEventRepository(db)
     participant_repo = SqlAlchemyParticipantRepository(db)
@@ -260,7 +266,11 @@ async def leave(db: DbSession, context: CurrentParticipant, settings: AppSetting
 
 @router.post("/me/consent", response_model=ParticipantPublic)
 async def set_consent(
-    body: ConsentRequest, db: DbSession, context: CurrentParticipant, bus: Bus
+    body: ConsentRequest,
+    db: DbSession,
+    context: CurrentParticipant,
+    bus: Bus,
+    storage: Storage,
 ) -> ParticipantPublic:
     repo = SqlAlchemyParticipantRepository(db)
     participant = await repo.get(context.event_id, context.participant_id)
@@ -269,6 +279,25 @@ async def set_consent(
     result = await use_cases.set_consent(
         repo, _clock, participant, is_photographable=body.is_photographable
     )
+
+    # Cascata GDPR sulla revoca: le foto attive che ritraggono il partecipante
+    # vengono rimosse (composizione a livello adapter via PhotoService, senza
+    # svelare il Cacciatore).
+    removed: list[tuple[UUID, str]] = []
+    if not body.is_photographable:
+        from whisper.photo.infrastructure.photo_port import PhotoService
+
+        removed = await PhotoService(db).remove_all_of_subject(
+            context.event_id, context.participant_id
+        )
+        result.events.extend(
+            DomainEvent(type="photo.removed", payload={"photo_id": str(photo_id)})
+            for photo_id, _key in removed
+        )
+
     await db.commit()
     await _publish(bus, context.event_id, result.events)
+    for _photo_id, key in removed:
+        with contextlib.suppress(Exception):  # purge best-effort
+            await storage.delete_object(key)
     return participant_public(result.participant)

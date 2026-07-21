@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, ApiError } from "../shared/api";
 import { game, type RosterEntry } from "../shared/game";
@@ -34,8 +34,13 @@ export function Capture() {
     [roster, meId],
   );
 
+  // pipeline in 3 passi: su errore si riprende dal passo fallito (niente doppi draft)
+  const draftRef = useRef<{ photo_id: string; upload_url: string; uploaded: boolean } | null>(null);
+
   function onPick(f: File | undefined) {
     if (!f) return;
+    if (preview) URL.revokeObjectURL(preview);
+    draftRef.current = null; // nuova foto = nuova bozza
     setFile(f);
     setPreview(URL.createObjectURL(f));
   }
@@ -46,12 +51,26 @@ export function Capture() {
     setBusy(true);
     setError(null);
     try {
-      const draft = await game.createDraft(subject, title.trim(), file.type);
-      await game.upload(draft.upload_url, file);
-      await game.publish(draft.photo_id);
-      navigate(`/photo/${draft.photo_id}`);
+      if (!draftRef.current) {
+        const draft = await game.createDraft(subject, title.trim(), file.type);
+        draftRef.current = {
+          photo_id: draft.photo_id,
+          upload_url: draft.upload_url,
+          uploaded: false,
+        };
+      }
+      if (!draftRef.current.uploaded) {
+        await game.upload(draftRef.current.upload_url, file);
+        draftRef.current.uploaded = true;
+      }
+      await game.publish(draftRef.current.photo_id);
+      navigate(`/photo/${draftRef.current.photo_id}`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Qualcosa è andato storto.");
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : "Caricamento non riuscito: controlla la connessione e riprova.",
+      );
     } finally {
       setBusy(false);
     }
@@ -68,7 +87,14 @@ export function Capture() {
       <form className="form" onSubmit={onSubmit}>
         <label className="field">
           <span>La preda (chi ha acconsentito)</span>
-          <select value={subject} onChange={(e) => setSubject(e.target.value)} required>
+          <select
+            value={subject}
+            onChange={(e) => {
+              draftRef.current = null; // il soggetto è parte della bozza
+              setSubject(e.target.value);
+            }}
+            required
+          >
             <option value="">— scegli un ospite —</option>
             {targets.map((t) => (
               <option key={t.participant_id} value={t.participant_id}>
@@ -90,10 +116,10 @@ export function Capture() {
               <IconCamera size="1.6rem" /> Tocca per scattare o scegliere
             </span>
           )}
+          {/* niente attributo `capture`: su iOS bloccherebbe la scelta dalla galleria */}
           <input
             type="file"
             accept="image/*"
-            capture="environment"
             hidden
             onChange={(e) => onPick(e.target.files?.[0])}
           />
@@ -103,7 +129,10 @@ export function Capture() {
           <span>Titolo misterioso</span>
           <input
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => {
+              draftRef.current = null; // il titolo è parte della bozza
+              setTitle(e.target.value);
+            }}
             placeholder="Es. « Un guanto lasciato cadere »"
             maxLength={120}
             required

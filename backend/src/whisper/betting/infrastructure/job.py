@@ -21,23 +21,24 @@ _OPEN_EVENTS = text("SELECT id FROM event WHERE status = 'open'")
 def make_betting_tick(bus: EventBus):
     async def betting_tick() -> None:
         now = datetime.now(UTC)
-        async with SessionFactory() as session:
-            event_ids = [r.id for r in (await session.execute(_OPEN_EVENTS)).all()]
-            for event_id in event_ids:
-                try:
+        async with SessionFactory() as listing:
+            event_ids = [r.id for r in (await listing.execute(_OPEN_EVENTS)).all()]
+        # una sessione per evento: un errore/rollback non contamina gli altri
+        for event_id in event_ids:
+            try:
+                async with SessionFactory() as session:
                     events = await BettingService(session).tick(event_id, now)
                     await session.commit()
-                    for e in events:
-                        await bus.publish(
-                            RealtimeMessage(
-                                event_id=event_id,
-                                type=e.type,
-                                payload=e.payload,
-                                target_participant_id=e.target_participant_id,
-                            )
+                for e in events:
+                    await bus.publish(
+                        RealtimeMessage(
+                            event_id=event_id,
+                            type=e.type,
+                            payload=e.payload,
+                            target_participant_id=e.target_participant_id,
                         )
-                except Exception:  # noqa: BLE001 — un evento non blocca gli altri
-                    logger.exception("betting tick fallito per evento %s", event_id)
-                    await session.rollback()
+                    )
+            except Exception:  # noqa: BLE001 — un evento non blocca gli altri
+                logger.exception("betting tick fallito per evento %s", event_id)
 
     return betting_tick

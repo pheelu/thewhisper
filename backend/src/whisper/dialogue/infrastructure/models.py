@@ -98,9 +98,7 @@ class DialogueMessageModel(UUIDMixin, AppendOnlyMixin, Base):
     conversation_id: Mapped[UUID] = mapped_column(
         ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False
     )
-    sender_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("participant.id", ondelete="CASCADE")
-    )
+    sender_id: Mapped[UUID | None] = mapped_column(ForeignKey("participant.id", ondelete="CASCADE"))
     kind: Mapped[MessageKind] = mapped_column(
         _enum(MessageKind, "message_kind"), nullable=False, default=MessageKind.text
     )
@@ -108,9 +106,7 @@ class DialogueMessageModel(UUIDMixin, AppendOnlyMixin, Base):
 
     __table_args__ = (
         Index("ix_dialogue_message_conversation", "conversation_id", "created_at"),
-        CheckConstraint(
-            "kind = 'system' OR char_length(body) BETWEEN 1 AND 1000", name="body_len"
-        ),
+        CheckConstraint("kind = 'system' OR char_length(body) BETWEEN 1 AND 1000", name="body_len"),
     )
 
 

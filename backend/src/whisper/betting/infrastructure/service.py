@@ -22,6 +22,10 @@ from whisper.shared.core.events import DomainEvent
 from whisper.shared.core.ids import uuid7
 
 _ROUND_COUNT = text("SELECT count(*) FROM bet_round WHERE event_id = :eid")
+_POOL_ADD = text(
+    "UPDATE bet_round SET total_pool = total_pool + :d, updated_at = now() "
+    "WHERE id = :rid RETURNING total_pool"
+)
 _IS_GUEST = text(
     "SELECT 1 FROM participant WHERE event_id = :eid AND id = :pid "
     "AND role = 'guest' AND left_at IS NULL"
@@ -151,7 +155,9 @@ class BettingService:
             )
         if candidate_id == participant_id:
             raise ValidationError("Non puoi puntare su te stesso.", code="betting.self_bet")
-        if (await self._s.execute(_IS_GUEST, {"eid": event_id, "pid": candidate_id})).first() is None:
+        if (
+            await self._s.execute(_IS_GUEST, {"eid": event_id, "pid": candidate_id})
+        ).first() is None:
             raise ValidationError("Candidato non valido.", code="betting.bad_candidate")
 
         existing = (
@@ -192,7 +198,12 @@ class BettingService:
             idempotency_key=f"bet_staked:{stake.id}",
             metadata={"round_id": str(round_id)},
         )
-        round_.total_pool += amount
+        # incremento atomico (evita lost update tra puntate concorrenti);
+        # NON riassegnare l'attributo ORM: al commit riscriverebbe il valore stantio.
+        new_pool = (
+            await self._s.execute(_POOL_ADD, {"d": amount, "rid": round_id})
+        ).scalar_one()
+        self._s.expire(round_, ["total_pool"])
 
         events = [
             *result.events,
@@ -209,7 +220,7 @@ class BettingService:
             ),
             DomainEvent(
                 type="betting.pool_updated",
-                payload={"round_id": str(round_id), "total_pool": round_.total_pool},
+                payload={"round_id": str(round_id), "total_pool": new_pool},
             ),
         ]
         return stake, events
@@ -233,7 +244,10 @@ class BettingService:
             raise ConflictError("Le puntate sono chiuse.", code="betting.closed")
 
         stake.status = BetStakeStatus.cancelled
-        round_.total_pool -= stake.amount
+        new_pool = (
+            await self._s.execute(_POOL_ADD, {"d": -stake.amount, "rid": round_.id})
+        ).scalar_one()
+        self._s.expire(round_, ["total_pool"])
         result = await self._points.award_points(
             event_id=event_id,
             participant_id=participant_id,
@@ -247,7 +261,7 @@ class BettingService:
             *result.events,
             DomainEvent(
                 type="betting.pool_updated",
-                payload={"round_id": str(round_.id), "total_pool": round_.total_pool},
+                payload={"round_id": str(round_.id), "total_pool": new_pool},
             ),
         ]
 
@@ -287,10 +301,15 @@ class BettingService:
         )
 
         window_end = min(round_.measurement_end, now)
+        window_start = round_.closes_at
+        if window_start >= window_end:
+            # settle forzato subito dopo il lock: la finestra post-chiusura è vuota,
+            # si misura l'attività dell'intero round (evita il void sistematico).
+            window_start = round_.opens_at
         metric_rows = (
             await self._s.execute(
                 _METRIC_SQL[round_.resolution_rule],
-                {"eid": round_.event_id, "start": round_.closes_at, "end": window_end},
+                {"eid": round_.event_id, "start": window_start, "end": window_end},
             )
         ).all()
 

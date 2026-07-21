@@ -70,7 +70,9 @@ class PointsService:
         if ledger_id is None:
             # idempotency_key già vista: no-op, nessun doppio accredito.
             return LedgerResult(
-                applied=False, new_score=await self._balance(event_id, participant_id), ledger_id=None
+                applied=False,
+                new_score=await self._balance(event_id, participant_id),
+                ledger_id=None,
             )
 
         new_score = (
@@ -96,6 +98,4 @@ class PointsService:
                 payload={"changed": [{"participant_id": str(participant_id), "score": new_score}]},
             ),
         ]
-        return LedgerResult(
-            applied=True, new_score=new_score, ledger_id=ledger_id, events=events
-        )
+        return LedgerResult(applied=True, new_score=new_score, ledger_id=ledger_id, events=events)

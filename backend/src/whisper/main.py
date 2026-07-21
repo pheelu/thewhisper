@@ -11,8 +11,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from whisper.settings import Settings
-
 from whisper.betting.infrastructure.job import make_betting_tick
 from whisper.betting.infrastructure.router import router as betting_router
 from whisper.dialogue.infrastructure.router import router as dialogue_router
@@ -21,7 +19,7 @@ from whisper.gamification.infrastructure.router import router as gamification_ro
 from whisper.identity.infrastructure.router import router as identity_router
 from whisper.photo.infrastructure.router import router as photo_router
 from whisper.profile.infrastructure.router import router as profile_router
-from whisper.settings import get_settings
+from whisper.settings import Settings, get_settings
 from whisper.shared.infrastructure.db.session import dispose_engine
 from whisper.shared.infrastructure.http.error_handlers import install_error_handlers
 from whisper.shared.infrastructure.realtime.broker import EventBus

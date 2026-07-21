@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../shared/api";
 import { bets, type BetRound } from "../shared/bets";
 import { game, type RosterEntry } from "../shared/game";
@@ -42,6 +42,21 @@ export function BetCard({ meId }: { meId: string }) {
     if (tick > 0 && tick % 30 === 0) void load();
   }, [tick, load]);
 
+  // quando il countdown arriva a zero, ricarica subito (una volta) invece di
+  // lasciare il form attivo su un round ormai chiuso
+  const deadlineReloaded = useRef(false);
+  useEffect(() => {
+    if (!round) return;
+    const expired =
+      (round.status === "open" && Date.now() >= new Date(round.closes_at).getTime()) ||
+      (round.status === "locked" && Date.now() >= new Date(round.measurement_end).getTime());
+    if (expired && !deadlineReloaded.current) {
+      deadlineReloaded.current = true;
+      void load();
+    }
+    if (!expired) deadlineReloaded.current = false;
+  }, [tick, round, load]);
+
   useWhisperSocket((msg) => {
     if (msg.type.startsWith("betting.")) void load();
   });
@@ -68,9 +83,12 @@ export function BetCard({ meId }: { meId: string }) {
   async function onCancel() {
     if (!round?.my_stake) return;
     setBusy(true);
+    setError(null);
     try {
       await bets.cancel(round.my_stake.stake_id);
       await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Errore di rete, riprova.");
     } finally {
       setBusy(false);
     }

@@ -130,12 +130,61 @@ async def send_missive(
 
 
 async def _load_for(
-    repo: DialogueRepository, event_id: UUID, conversation_id: UUID, participant_id: UUID
+    repo: DialogueRepository,
+    event_id: UUID,
+    conversation_id: UUID,
+    participant_id: UUID,
+    *,
+    for_update: bool = False,
 ) -> Conversation:
-    conversation = await repo.get_conversation(event_id, conversation_id)
+    getter = repo.get_conversation_for_update if for_update else repo.get_conversation
+    conversation = await getter(event_id, conversation_id)
     if conversation is None or conversation.side_of(participant_id) is None:
         raise NotFoundError("Conversazione non trovata.", code="dialogue.not_found")
     return conversation
+
+
+async def _maybe_exchange_contacts(
+    repo: DialogueRepository,
+    points: PointsPort,
+    conversation: Conversation,
+    now,
+) -> list[DomainEvent]:
+    """Se doppio consenso + mittente rivelato, esegue lo scambio contatti (idempotente)."""
+    if not conversation.contact_exchange_ready:
+        return []
+    conversation.contact_exchanged_at = now
+    await repo.add_message(
+        Message(
+            id=uuid7(),
+            event_id=conversation.event_id,
+            conversation_id=conversation.id,
+            sender_id=None,
+            kind=MessageKind.system,
+            body="contact_exchanged",
+            created_at=now,
+        )
+    )
+    events: list[DomainEvent] = []
+    for pid in (conversation.initiator_id, conversation.recipient_id):
+        result = await points.award_points(
+            event_id=conversation.event_id,
+            participant_id=pid,
+            delta=DIALOGUE_MATCHED_POINTS,
+            reason=PointReason.dialogue_matched,
+            source_domain="dialogue",
+            idempotency_key=f"dialogue_matched:{conversation.id}:{pid}",
+            metadata={"conversation_id": str(conversation.id)},
+        )
+        events.extend(result.events)
+        events.append(
+            DomainEvent(
+                type="dialogue.contact_exchanged",
+                payload={"conversation_id": str(conversation.id)},
+                target_participant_id=pid,
+            )
+        )
+    return events
 
 
 async def send_message(
@@ -214,13 +263,17 @@ async def send_message(
 
 async def reveal_identity(
     repo: DialogueRepository,
+    points: PointsPort,
     clock: Clock,
     *,
     event_id: UUID,
     conversation_id: UUID,
     participant_id: UUID,
 ) -> DialogueResult:
-    conversation = await _load_for(repo, event_id, conversation_id, participant_id)
+    # lock di riga: serializza con set_contact concorrente
+    conversation = await _load_for(
+        repo, event_id, conversation_id, participant_id, for_update=True
+    )
     if participant_id != conversation.initiator_id:
         raise ForbiddenError(
             "Solo chi ha scritto la missiva può rivelarsi.", code="dialogue.not_initiator"
@@ -232,7 +285,6 @@ async def reveal_identity(
     conversation.initiator_revealed = True
     conversation.revealed_at = now
     conversation.updated_at = now
-    await repo.update_conversation(conversation)
 
     system = Message(
         id=uuid7(),
@@ -255,6 +307,9 @@ async def reveal_identity(
             target_participant_id=conversation.recipient_id,
         )
     ]
+    # il reveal può essere l'ultimo tassello dello scambio contatti
+    events.extend(await _maybe_exchange_contacts(repo, points, conversation, now))
+    await repo.update_conversation(conversation)
     return DialogueResult(conversation=conversation, message=system, events=events)
 
 
@@ -274,7 +329,10 @@ async def set_contact(
     Quando entrambe le parti hanno acconsentito e il mittente si è rivelato, lo
     scambio avviene: messaggio di sistema + evento mirato a entrambi + punti.
     """
-    conversation = await _load_for(repo, event_id, conversation_id, participant_id)
+    # lock di riga: due consensi simultanei non si sovrascrivono più a vicenda
+    conversation = await _load_for(
+        repo, event_id, conversation_id, participant_id, for_update=True
+    )
     now = clock.now()
 
     await repo.upsert_contact(
@@ -294,49 +352,15 @@ async def set_contact(
         conversation.recipient_contact_consent = True
     conversation.updated_at = now
 
-    events: list[DomainEvent] = []
-    exchanged = False
-
-    if conversation.contact_exchange_ready:
-        conversation.contact_exchanged_at = now
-        exchanged = True
-        await repo.add_message(
-            Message(
-                id=uuid7(),
-                event_id=event_id,
-                conversation_id=conversation.id,
-                sender_id=None,
-                kind=MessageKind.system,
-                body="contact_exchanged",
-                created_at=now,
-            )
-        )
-        for pid in (conversation.initiator_id, conversation.recipient_id):
-            result = await points.award_points(
-                event_id=event_id,
-                participant_id=pid,
-                delta=DIALOGUE_MATCHED_POINTS,
-                reason=PointReason.dialogue_matched,
-                source_domain="dialogue",
-                idempotency_key=f"dialogue_matched:{conversation.id}:{pid}",
-                metadata={"conversation_id": str(conversation.id)},
-            )
-            events.extend(result.events)
-            events.append(
-                DomainEvent(
-                    type="dialogue.contact_exchanged",
-                    payload={"conversation_id": str(conversation.id)},
-                    target_participant_id=pid,
-                )
-            )
-    else:
+    events = await _maybe_exchange_contacts(repo, points, conversation, now)
+    if not events:
         events.append(
             DomainEvent(
                 type="dialogue.contact_consent_updated",
                 payload={
                     "conversation_id": str(conversation.id),
                     "consented": True,
-                    "pending": not exchanged,
+                    "pending": True,
                 },
                 target_participant_id=conversation.counterpart_of(participant_id),
             )

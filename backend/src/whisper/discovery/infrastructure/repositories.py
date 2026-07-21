@@ -41,6 +41,12 @@ class SqlAlchemyDiscoveryRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._s = session
 
+    async def lock_photo_discovery(self, photo_id: UUID) -> None:
+        # advisory lock transazionale: serializza i guess sulla stessa foto
+        await self._s.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:pid))"), {"pid": str(photo_id)}
+        )
+
     async def add_comment(self, comment: Comment) -> None:
         self._s.add(
             WhisperCommentModel(

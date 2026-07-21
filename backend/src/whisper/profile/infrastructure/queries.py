@@ -58,9 +58,7 @@ async def roster(session: AsyncSession, event_id: UUID) -> list[dict[str, Any]]:
 async def public_profile(
     session: AsyncSession, event_id: UUID, participant_id: UUID, viewer_id: UUID
 ) -> dict[str, Any] | None:
-    row = (
-        await session.execute(_ONE, {"eid": event_id, "pid": participant_id})
-    ).one_or_none()
+    row = (await session.execute(_ONE, {"eid": event_id, "pid": participant_id})).one_or_none()
     if row is None:
         return None
     is_self = participant_id == viewer_id

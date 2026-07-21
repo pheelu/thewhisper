@@ -70,9 +70,7 @@ class SqlAlchemyPhotoRepository:
         await self._s.flush()
 
     async def get(self, event_id: UUID, photo_id: UUID) -> Photo | None:
-        stmt = select(PhotoModel).where(
-            PhotoModel.id == photo_id, PhotoModel.event_id == event_id
-        )
+        stmt = select(PhotoModel).where(PhotoModel.id == photo_id, PhotoModel.event_id == event_id)
         row = (await self._s.execute(stmt)).scalar_one_or_none()
         return _to_photo(row) if row else None
 

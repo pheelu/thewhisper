@@ -31,7 +31,9 @@ _RECENT = text(
 )
 
 
-async def leaderboard(session: AsyncSession, event_id: UUID, limit: int = 20) -> list[dict[str, Any]]:
+async def leaderboard(
+    session: AsyncSession, event_id: UUID, limit: int = 20
+) -> list[dict[str, Any]]:
     rows = (await session.execute(_LEADERBOARD, {"eid": event_id, "limit": limit})).all()
     return [
         {
@@ -49,9 +51,7 @@ async def recent_movements(
     session: AsyncSession, event_id: UUID, participant_id: UUID, limit: int = 20
 ) -> list[dict[str, Any]]:
     rows = (
-        await session.execute(
-            _RECENT, {"eid": event_id, "pid": participant_id, "limit": limit}
-        )
+        await session.execute(_RECENT, {"eid": event_id, "pid": participant_id, "limit": limit})
     ).all()
     return [
         {
