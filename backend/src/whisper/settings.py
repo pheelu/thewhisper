@@ -6,6 +6,7 @@ direttamente.
 
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +20,11 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     secret_key: str = "change-me-dev-secret-please-rotate"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # URL pubblico dell'app (per link di join/QR). Render lo fornisce come
+    # RENDER_EXTERNAL_URL; in dev resta vuoto e si usa l'origine del frontend.
+    public_base_url: str = Field(
+        default="", validation_alias=AliasChoices("PUBLIC_BASE_URL", "RENDER_EXTERNAL_URL")
+    )
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://whisper:whisper@localhost:5432/whisper"

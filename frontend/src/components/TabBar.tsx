@@ -4,6 +4,7 @@ const tabs = [
   { to: "/home", label: "Salotto", icon: "♛" },
   { to: "/feed", label: "Feed", icon: "🖼" },
   { to: "/capture", label: "Scatta", icon: "✎" },
+  { to: "/missives", label: "Missive", icon: "💌" },
   { to: "/profile", label: "Profilo", icon: "✒︎" },
 ];
 

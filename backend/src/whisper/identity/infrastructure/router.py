@@ -80,8 +80,11 @@ def _set_session_cookie(
 
 
 def _join_url(settings: Settings, join_code: str) -> str:
-    origins = settings.cors_origin_list
-    base = origins[0].rstrip("/") if origins else ""
+    if settings.public_base_url:
+        base = settings.public_base_url.rstrip("/")
+    else:
+        origins = settings.cors_origin_list
+        base = origins[0].rstrip("/") if origins else ""
     return f"{base}/j/{join_code}"
 
 
@@ -165,6 +168,26 @@ async def close_event(
     await db.commit()
     await _publish(bus, event.id, events)
     return event_host_view(event)
+
+
+@router.get("/events/{event_id}/qr.png", include_in_schema=False)
+async def event_qr(event_id: UUID, db: DbSession, context: CurrentParticipant, settings: AppSettings):
+    """QR del link di ingresso (PNG). Visibile all'host della serata."""
+    import io
+
+    import qrcode
+    from fastapi import Response as FastAPIResponse
+
+    if not context.is_host or context.event_id != event_id:
+        raise ForbiddenError("Operazione riservata all'organizzatore.", code="session.not_host")
+    event = await SqlAlchemyEventRepository(db).get(event_id)
+    if event is None:
+        raise NotFoundError("Serata non trovata.", code="event.not_found")
+
+    img = qrcode.make(_join_url(settings, event.join_code), box_size=10, border=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return FastAPIResponse(content=buf.getvalue(), media_type="image/png")
 
 
 @router.post("/events/{event_id}/host-session", response_model=HostSessionResponse)

@@ -77,6 +77,11 @@ export function Host() {
         <div className="card card--code">
           <span className="card__label">Codice serata</span>
           <div className="code">{created.event.join_code}</div>
+          <img
+            className="qr"
+            src={`/api/v1/events/${created.event.id}/qr.png`}
+            alt="QR della serata"
+          />
           <a className="linky" href={created.join_url} target="_blank" rel="noreferrer">
             {created.join_url}
           </a>

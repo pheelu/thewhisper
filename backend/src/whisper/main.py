@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from whisper.settings import Settings
 
+from whisper.dialogue.infrastructure.router import router as dialogue_router
 from whisper.discovery.infrastructure.router import router as discovery_router
 from whisper.gamification.infrastructure.router import router as gamification_router
 from whisper.identity.infrastructure.router import router as identity_router
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
     app.include_router(profile_router)
     app.include_router(photo_router)
     app.include_router(discovery_router)
+    app.include_router(dialogue_router)
     register_ws(app)
     _mount_frontend(app, settings)
     return app
