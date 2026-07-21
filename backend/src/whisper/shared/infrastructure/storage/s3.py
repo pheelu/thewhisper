@@ -8,8 +8,13 @@ retention/erase raggiunge tutti gli oggetti dell'evento con un solo prefisso.
 from __future__ import annotations
 
 import aioboto3
+from aiobotocore.config import AioConfig
 
 from whisper.settings import Settings
+
+# Supabase Storage (e S3 moderno in generale) accetta solo firme SigV4 in
+# path-style: senza questa config boto può ripiegare su SigV2 → "Missing signature".
+_S3_CONFIG = AioConfig(signature_version="s3v4", s3={"addressing_style": "path"})
 
 
 class S3Storage:
@@ -28,6 +33,7 @@ class S3Storage:
             region_name=self._region,
             aws_access_key_id=self._access_key,
             aws_secret_access_key=self._secret_key,
+            config=_S3_CONFIG,
         )
 
     async def ensure_bucket(self) -> None:
